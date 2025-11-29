@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#030712">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>花海 AI Engine</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌍</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              gray: {
+                850: '#1f2937',
+                900: '#111827',
+                950: '#030712',
+              }
+            },
+            screens: {
+              'lg': '1024px', // Define explicit desktop breakpoint
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      /* Strict PWA Fullscreen Fixes */
+      html {
+        height: 100dvh; /* Use dynamic viewport height */
+        width: 100vw;
+        overflow: hidden;
+        background-color: #030712;
+        position: fixed; /* Prevent scroll chaining */
+      }
+      
+      body {
+        height: 100dvh;
+        width: 100vw;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+        background-color: #030712;
+        color: #e2e8f0;
+        touch-action: none;
+        position: fixed;
+        inset: 0;
+      }
+      
+      #root {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* Force dark inputs */
+      input, textarea, select {
+        background-color: #030712 !important;
+        color: #f8fafc !important;
+        border-color: #334155 !important;
+      }
+
+      /* Custom Scrollbar */
+      ::-webkit-scrollbar {
+        width: 4px;
+        height: 4px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #a855f7;
+        border-radius: 2px;
+        box-shadow: 0 0 8px rgba(168, 85, 247, 0.8);
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #c084fc;
+      }
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: #a855f7 transparent;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
+    "vite": "https://aistudiocdn.com/vite@^7.2.4",
+    "react-dom": "https://aistudiocdn.com/react-dom@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-gray-950 text-slate-200">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(reg => console.log('SW registered:', reg))
+            .catch(err => console.log('SW failed:', err));
+        });
+      }
+
+      // Global Touch Handler to prevent PWA Rubber Banding / Overscroll
+      document.addEventListener('touchmove', function(e) {
+        let target = e.target;
+        let isScrollable = false;
+        
+        while (target && target !== document.body) {
+          if (target.scrollHeight > target.clientHeight || target.scrollWidth > target.clientWidth) {
+             const style = window.getComputedStyle(target);
+             if (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowX === 'auto' || style.overflowX === 'scroll') {
+                 isScrollable = true;
+                 break;
+             }
+          }
+          target = target.parentElement;
+        }
+
+        if (!isScrollable && e.cancelable) {
+          e.preventDefault();
+        }
+      }, { passive: false });
+    </script>
+  </body>
+</html>

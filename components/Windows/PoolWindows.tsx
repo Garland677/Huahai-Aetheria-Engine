@@ -1,0 +1,926 @@
+
+import React, { useState, useRef } from 'react';
+import { GameState, WindowState, Character, Card, MapLocation, GameAttribute, AttributeType, AttributeVisibility, Conflict, Provider, PrizePool, PrizeItem, DebugLog } from '../../types';
+import { X, Edit2, Trash2, Plus, User, Coins, Layers, Users, Box, Zap, Backpack, MapPin, Navigation, Eye, EyeOff, AlertTriangle, CheckCircle, Filter, Sparkles, Loader2, Bot, FileText, Gift, ArrowRight, CheckSquare, Square, ChevronUp, ChevronDown } from 'lucide-react';
+import { CardEditor } from '../Windows/CardEditor';
+import { Input, TextArea, Label, Button } from '../ui/Button';
+import { generateCharacter } from '../../services/aiService';
+import { DEFAULT_AI_CONFIG } from '../../config';
+import { getRandomChineseNames } from '../../services/nameService';
+import { defaultAcquireCard, defaultInteractCard, defaultTradeCard } from '../../services/DefaultSettings';
+import { generateRandomFlagAvatar } from '../../assets/imageLibrary';
+import { ImageUploader } from '../ui/ImageUploader';
+
+interface PoolWindowProps {
+    winId: number;
+    state: GameState;
+    updateState: (updater: (current: GameState) => GameState) => void;
+    closeWindow: (id: number) => void;
+    openWindow: (type: WindowState['type'], data?: any) => void;
+    addLog: (text: string) => void;
+    selectedCharId: string | null;
+    onSaveCard?: (card: Card) => void;
+    // Optional data for generation logic
+    data?: any; 
+    addDebugLog?: (log: DebugLog) => void; // New Prop
+}
+
+// Duplicate helper for simplicity in this scope
+const getNextConflictId = (characters: Record<string, Character>): number => {
+    let max = 0;
+    Object.values(characters).forEach(c => {
+        c.conflicts?.forEach(x => {
+            const n = parseInt(x.id);
+            if (!isNaN(n) && n > max) max = n;
+        });
+    });
+    return max + 1;
+};
+
+// Exported Generator Modal for standalone use
+export const AiGenWindow: React.FC<{
+    state: GameState,
+    updateState: (updater: (current: GameState) => GameState) => void,
+    addLog: (text: string) => void,
+    onClose: () => void,
+    isPlayerMode?: boolean,
+    addDebugLog?: (log: DebugLog) => void;
+}> = ({ state, updateState, addLog, onClose, isPlayerMode = false, addDebugLog }) => {
+    const [genDesc, setGenDesc] = useState("");
+    const [genStyle, setGenStyle] = useState("");
+    const [isGenerating, setIsGenerating] = useState(false);
+
+    const activeLocId = state.map.activeLocationId;
+    const activeLocName = activeLocId ? state.map.locations[activeLocId]?.name : "未知区域";
+
+    const handleGenerate = async () => {
+        // Allow empty inputs for auto-generation based on context
+        setIsGenerating(true);
+        
+        const loc = state.map.locations[activeLocId || ""];
+        const region = loc && loc.regionId ? state.map.regions[loc.regionId] : null;
+        
+        // Get existing chars in this location for context
+        const localChars = (Object.values(state.characters) as Character[])
+            .filter(c => state.map.charPositions[c.id]?.locationId === activeLocId)
+            .map(c => `${c.name}: ${c.description.substring(0, 50)}...`)
+            .join('\n');
+
+        const modelConfig = state.judgeConfig || DEFAULT_AI_CONFIG;
+
+        // Use defaults if empty
+        const finalDesc = genDesc.trim() || "请根据当前地点和区域的背景设定，随机创作一个符合氛围的角色。";
+        const finalStyle = genStyle.trim() || "请根据角色设定自动搭配合适的技能组。";
+
+        try {
+            // Fetch Suggested Names
+            const suggestedNames = await getRandomChineseNames(10);
+
+            const genData = await generateCharacter(
+                modelConfig,
+                finalDesc,
+                finalStyle,
+                loc ? loc.name : "未知荒野",
+                region ? region.name : "未探明区域",
+                localChars,
+                state.world.history,
+                state.appSettings,
+                state.defaultSettings,
+                state.globalContext, // Pass Global Context
+                state.world.worldGuidance,
+                suggestedNames,
+                state, // Full Game State for triggers
+                (msg) => addLog(msg), // Trigger Log Callback
+                undefined, // Trigger Update Callback (Generation shouldn't modify triggers usually, or ignore for now)
+                addDebugLog // Pass Debug Log
+            );
+
+            if (genData) {
+                const newId = `gen_${isPlayerMode ? 'player' : 'npc'}_${Date.now()}`;
+                
+                // Ensure global sequential conflict ID
+                let nextConflictId = getNextConflictId(state.characters);
+                const newConflicts = (genData.conflicts || []).map((c: any) => ({
+                    ...c,
+                    id: String(nextConflictId++)
+                }));
+
+                // Convert AI flat skill to Card object
+                const rawSkills = genData.skills || [];
+                // NEW: Filter out redundant basic skills generated by AI before processing
+                // The prompt asks AI not to generate them, but this is a failsafe.
+                const uniqueAiSkills = rawSkills.filter((s: any) => {
+                    const n = (s.name || "").toLowerCase();
+                    return !['交易', '互动', '获取', 'trade', 'interact', 'acquire', '尝试获取'].some(k => n.includes(k));
+                });
+
+                const newSkills: Card[] = uniqueAiSkills.map((s: any, i: number) => {
+                    const isSettlement = s.trigger === 'settlement';
+                    const targetType = isSettlement ? 'self' : 'specific_char';
+                    
+                    // Updated logic to use new effect_attr and effect_val
+                    let effectVal = s.effect_val;
+                    const effectAttr = s.effect_attr || '健康';
+                    
+                    // If undefined/null, treat as dynamic (fallback), but we try to avoid this.
+                    // Default to -5 if not provided.
+                    const isDynamic = (effectVal === undefined || effectVal === null);
+                    if (isDynamic) {
+                        effectVal = isSettlement ? 5 : -5;
+                    }
+
+                    return {
+                        id: `card_${newId}_${i}`,
+                        name: s.name,
+                        description: s.description || "AI Generated Skill",
+                        itemType: 'skill',
+                        triggerType: s.trigger || 'active',
+                        cost: 0,
+                        effects: [
+                            {
+                                id: `eff_hit_${i}`,
+                                name: '命中/触发判定',
+                                targetType: targetType,
+                                targetAttribute: '健康',
+                                value: 0,
+                                conditionDescription: s.condition || "True",
+                                conditionContextKeys: []
+                            },
+                            {
+                                id: `eff_res_${i}`,
+                                name: '实际效果',
+                                targetType: targetType,
+                                targetAttribute: effectAttr,
+                                value: effectVal,
+                                dynamicValue: false, // Force false to prevent AI overhead
+                                conditionDescription: "True",
+                                conditionContextKeys: []
+                            }
+                        ]
+                    };
+                });
+
+                // --- INJECT DEFAULT CARDS (Trade included) ---
+                if (!newSkills.some((s: any) => s.name.includes("获取") || s.id === defaultAcquireCard.id)) {
+                    newSkills.push(defaultAcquireCard);
+                }
+                if (!newSkills.some((s: any) => s.id === defaultTradeCard.id)) {
+                    newSkills.push(defaultTradeCard);
+                }
+                if (!newSkills.some((s: any) => s.id === defaultInteractCard.id)) {
+                    newSkills.push(defaultInteractCard);
+                }
+
+                // --- NORMALIZE ATTRIBUTES ---
+                // AI often returns simplified JSON (e.g. "Health": 50). We must convert it to GameAttribute objects.
+                const rawAttributes = genData.attributes || {};
+                const finalAttributes: Record<string, GameAttribute> = {};
+
+                Object.entries(rawAttributes).forEach(([key, val]: [string, any]) => {
+                    if (val === null || val === undefined) return;
+
+                    let finalVal: string | number = 50;
+                    let type = AttributeType.NUMBER;
+
+                    // Handle primitive input (e.g. "健康": 80)
+                    if (typeof val === 'number' || typeof val === 'string') {
+                        finalVal = val;
+                    } 
+                    // Handle object input (e.g. "健康": { value: 80 } or complete object)
+                    else if (typeof val === 'object') {
+                        if ('value' in val) finalVal = val.value;
+                        else finalVal = 50; // Fallback
+                    }
+
+                    // Determine Type based on value content
+                    if (typeof finalVal === 'number' || (!isNaN(Number(finalVal)) && String(finalVal).trim() !== '')) {
+                        type = AttributeType.NUMBER;
+                        finalVal = Number(finalVal);
+                    } else {
+                        type = AttributeType.TEXT;
+                        finalVal = String(finalVal);
+                    }
+
+                    finalAttributes[key] = {
+                        id: key,
+                        name: key,
+                        type: type,
+                        value: finalVal,
+                        visibility: AttributeVisibility.PUBLIC
+                    };
+                });
+
+                // Ensure '创造点' (CP) exists
+                if (!finalAttributes['创造点']) {
+                    finalAttributes['创造点'] = { id: '创造点', name: '创造点', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC };
+                }
+
+                const newChar: Character = {
+                    id: newId,
+                    isPlayer: isPlayerMode, // Set based on mode
+                    name: genData.name || "AI角色",
+                    appearance: genData.appearance || "普通的样貌", // Default if missing
+                    description: genData.description || "...",
+                    avatarUrl: generateRandomFlagAvatar(), // Auto Generate Avatar
+                    attributes: finalAttributes,
+                    skills: newSkills,
+                    inventory: [],
+                    // Map drives from AI response (fallback to empty if old format)
+                    drives: genData.drives || genData.creationTriggers || [],
+                    conflicts: newConflicts,
+                    // Inherit global model config
+                    aiConfig: { ...modelConfig },
+                    contextConfig: { messages: [] },
+                    appearanceCondition: "在此地",
+                    enableAppearanceCheck: true,
+                    isFollowing: isPlayerMode // Auto-follow for player
+                };
+
+                updateState(prev => {
+                    // If it's a new player character, ensure we add it to the order immediately
+                    let newOrder = prev.round.currentOrder;
+                    if (isPlayerMode && !newOrder.includes(newId)) {
+                        newOrder = [...newOrder, newId];
+                    }
+
+                    return {
+                        ...prev,
+                        characters: { ...prev.characters, [newId]: newChar },
+                        map: {
+                            ...prev.map,
+                            charPositions: {
+                                ...prev.map.charPositions,
+                                [newId]: { x: loc?.coordinates.x || 0, y: loc?.coordinates.y || 0, locationId: activeLocId }
+                            }
+                        },
+                        round: {
+                            ...prev.round,
+                            currentOrder: newOrder,
+                            defaultOrder: isPlayerMode ? [...prev.round.defaultOrder, newId] : prev.round.defaultOrder
+                        }
+                    };
+                });
+                
+                addLog(`系统: AI 已生成${isPlayerMode ? '玩家' : 'NPC'}角色 [${newChar.name}] 并加入当前地点。`);
+                onClose();
+            }
+        } catch (e: any) {
+            alert("生成失败: " + e.message);
+        } finally {
+            setIsGenerating(false);
+        }
+    };
+
+    return (
+        <div className="absolute inset-0 bg-slate-950/90 z-[60] flex items-center justify-center p-6 animate-in fade-in">
+            {/* Widened to max-w-5xl for better editing experience */}
+            <div className="w-full max-w-5xl bg-slate-900 border border-indigo-500/50 rounded-lg p-6 shadow-2xl relative flex flex-col max-h-[90vh]">
+                <button onClick={() => !isGenerating && onClose()} className="absolute top-4 right-4 text-slate-500 hover:text-white"><X size={20}/></button>
+                
+                <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                    {isPlayerMode ? <User className="text-indigo-400"/> : <Bot className="text-teal-400"/>}
+                    {isPlayerMode ? "创建玩家角色 (Player Generation)" : "NPC 快速生成 (NPC Generation)"}
+                </h3>
+                
+                <div className="mb-4 text-sm text-slate-400 bg-slate-950 p-3 rounded border border-slate-800">
+                    <p>生成地点: <span className="text-indigo-300 font-bold">{activeLocName}</span></p>
+                    {isPlayerMode && <p className="text-indigo-400 mt-1 text-xs font-bold">将在生成后自动开启跟随模式。</p>}
+                </div>
+
+                {/* Updated layout to single column flex for wider inputs */}
+                <div className="space-y-6 overflow-y-auto flex-1 mb-4 flex flex-col">
+                    <div className="flex flex-col gap-2 flex-1">
+                        <Label>角色描述 / 身份背景 (Description)</Label>
+                        <TextArea 
+                            className="h-48 resize-none text-sm" 
+                            placeholder="例如: 一个精通机械的女性冒险家，性格冷静，专业水平过硬... (留空则由AI根据地点自动发挥)"
+                            value={genDesc}
+                            onChange={e => setGenDesc(e.target.value)}
+                            disabled={isGenerating}
+                        />
+                    </div>
+                    <div className="flex flex-col gap-2 flex-1">
+                        <Label>技能 / 战斗风格 (Skill Style)</Label>
+                        <TextArea 
+                            className="h-32 resize-none text-sm" 
+                            placeholder="例如: 喜欢说话，擅长用语言干扰敌人；或者擅长使用重型火器... (留空则由AI自动搭配)"
+                            value={genStyle}
+                            onChange={e => setGenStyle(e.target.value)}
+                            disabled={isGenerating}
+                        />
+                        <p className="text-[10px] text-slate-500 mt-1">AI 将根据此风格生成角色的固有卡牌(Skills)。</p>
+                    </div>
+                </div>
+
+                <div className="flex justify-end gap-2 mt-auto pt-4 border-t border-slate-800">
+                    <Button variant="secondary" onClick={onClose} disabled={isGenerating}>取消</Button>
+                    <Button onClick={handleGenerate} disabled={isGenerating}>
+                        {isGenerating ? <><Loader2 size={16} className="animate-spin mr-2"/> 生成中...</> : "确认生成"}
+                    </Button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// Helper for horizontal scrolling
+const HorizontalScrollContainer: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const onWheel = (e: React.WheelEvent) => {
+    if (scrollRef.current) {
+      // 1. Temporarily disable snapping to allow free scroll
+      scrollRef.current.style.scrollSnapType = 'none';
+      
+      // 2. Perform the scroll
+      scrollRef.current.scrollLeft += e.deltaY;
+      
+      // 3. Clear previous timer
+      if (timerRef.current) clearTimeout(timerRef.current);
+      
+      // 4. Re-enable snapping after wheel stops (debounce)
+      timerRef.current = window.setTimeout(() => {
+          if (scrollRef.current) {
+              scrollRef.current.style.scrollSnapType = 'x mandatory';
+          }
+      }, 150);
+    }
+  };
+
+  return (
+      <div 
+        ref={scrollRef}
+        className="flex flex-1 overflow-x-auto gap-4 p-6"
+        style={{ scrollSnapType: 'x mandatory', scrollBehavior: 'auto' }}
+        onWheel={onWheel}
+      >
+          {children}
+      </div>
+  );
+};
+
+export const CharacterPoolWindow: React.FC<PoolWindowProps> = ({ winId, state, updateState, closeWindow, openWindow, addLog, addDebugLog }) => {
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [showCurrentLocOnly, setShowCurrentLocOnly] = useState(true);
+  const [isGenModalOpen, setGenModalOpen] = useState(false);
+
+  const activeLocId = state.map.activeLocationId;
+  const activeLocName = activeLocId ? state.map.locations[activeLocId]?.name : "未知区域";
+
+  // Filter characters based on location toggle
+  const displayChars = (Object.values(state.characters) as Character[]).filter(char => {
+      if (!showCurrentLocOnly) return true;
+      const pos = state.map.charPositions[char.id];
+      return pos && pos.locationId === activeLocId;
+  });
+
+  const handleDelete = (charId: string) => {
+      if (deleteConfirmId === charId) {
+          updateState(prev => {
+              const newChars = { ...prev.characters };
+              delete newChars[charId];
+              return {
+                  ...prev,
+                  characters: newChars,
+                  round: {
+                      ...prev.round,
+                      defaultOrder: prev.round.defaultOrder.filter(id => id !== charId),
+                      currentOrder: prev.round.currentOrder.filter(id => id !== charId)
+                  }
+              };
+          });
+          setDeleteConfirmId(null);
+          addLog(`系统: 角色已永久移除。`);
+      } else {
+          setDeleteConfirmId(charId);
+          setTimeout(() => setDeleteConfirmId(prev => prev === charId ? null : prev), 3000);
+      }
+  };
+
+  return (
+  <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+      <div className="w-full max-w-5xl h-[500px] bg-slate-900 border border-slate-700 shadow-2xl rounded-lg flex flex-col">
+          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950 rounded-t-lg shrink-0">
+              <div className="flex items-center gap-4 overflow-hidden">
+                  <h2 className="font-bold text-lg text-slate-100 flex items-center gap-2 shrink-0"><Users size={18}/> 角色管理</h2>
+                  
+                  <button 
+                      onClick={() => setShowCurrentLocOnly(!showCurrentLocOnly)}
+                      className={`
+                          flex items-center gap-2 px-3 py-1 rounded text-xs font-bold border transition-colors whitespace-nowrap
+                          ${showCurrentLocOnly ? 'bg-indigo-900/30 border-indigo-500 text-indigo-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:text-slate-300'}
+                      `}
+                      title="切换显示范围"
+                  >
+                      <Filter size={12} className={showCurrentLocOnly ? "fill-indigo-500" : ""}/>
+                      {showCurrentLocOnly ? `仅当前地点` : "全部"}
+                  </button>
+              </div>
+              <button onClick={() => closeWindow(winId)} className="text-slate-400 hover:text-white shrink-0"><X size={20}/></button>
+          </div>
+          
+          <HorizontalScrollContainer>
+              {/* Create Manual */}
+              <div 
+                  onClick={() => openWindow('char')}
+                  className="min-w-[200px] w-[200px] h-full border-2 border-dashed border-slate-700 rounded-lg flex flex-col items-center justify-center text-slate-500 hover:text-slate-300 hover:border-slate-500 cursor-pointer bg-slate-900/30 hover:bg-slate-900 transition-colors snap-center gap-2"
+              >
+                  <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center">
+                      <Plus size={24}/>
+                  </div>
+                  <span className="text-xs font-bold">手动创建</span>
+              </div>
+
+              {/* AI Generate */}
+              <div 
+                  onClick={() => setGenModalOpen(true)}
+                  className="min-w-[200px] w-[200px] h-full border-2 border-dashed border-indigo-500/50 rounded-lg flex flex-col items-center justify-center text-indigo-400 hover:text-indigo-200 hover:border-indigo-400 cursor-pointer bg-indigo-900/10 hover:bg-indigo-900/20 transition-colors snap-center gap-2"
+              >
+                  <div className="w-12 h-12 rounded-full bg-indigo-900/50 flex items-center justify-center border border-indigo-500/30">
+                      <Sparkles size={24}/>
+                  </div>
+                  <span className="text-xs font-bold">AI 生成角色</span>
+                  <span className="text-[9px] text-indigo-500/70 text-center px-4">基于当前地点和历史自动生成</span>
+              </div>
+
+              {displayChars.length === 0 && (
+                  <div className="flex flex-col items-center justify-center min-w-[300px] text-slate-500 italic text-sm p-4">
+                      <span>当前地点暂无角色。</span>
+                      <button onClick={() => setShowCurrentLocOnly(false)} className="text-indigo-400 hover:underline mt-2">查看所有角色</button>
+                  </div>
+              )}
+
+              {displayChars.map((char) => (
+                  <div key={char.id} className="min-w-[240px] w-[240px] h-full bg-slate-950 border border-slate-800 rounded-lg flex flex-col overflow-hidden relative group hover:border-indigo-500 transition-all shadow-lg snap-center">
+                       <div className="h-[140px] bg-slate-900 relative overflow-hidden border-b border-slate-800">
+                           {char.avatarUrl ? (
+                               <img src={char.avatarUrl} className="w-full h-full object-cover transition-transform group-hover:scale-105" style={{ imageRendering: 'pixelated' }}/>
+                           ) : (
+                               <div className="w-full h-full flex items-center justify-center bg-slate-800 text-slate-700">
+                                   <User size={48}/>
+                               </div>
+                           )}
+                           <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950 to-transparent h-10"></div>
+                           <div className="absolute bottom-2 left-3 text-white font-bold text-lg drop-shadow-md">{char.name}</div>
+                           {char.isPlayer && <div className="absolute top-2 right-2 bg-indigo-600 px-2 py-0.5 rounded text-[9px] font-bold text-white border border-indigo-400 shadow">PLAYER</div>}
+                           <div className="absolute top-2 left-2 bg-black/60 px-2 py-0.5 rounded text-[9px] font-mono text-white">ID: {char.id}</div>
+                       </div>
+                       
+                       <div className="p-3 flex-1 flex flex-col gap-2">
+                           <div className="flex justify-between items-center text-xs">
+                               <div className="flex items-center gap-1 text-yellow-500 bg-yellow-900/10 px-2 py-1 rounded border border-yellow-900/30">
+                                   <Coins size={12}/> {char.attributes['cp']?.value ?? char.attributes['创造点']?.value ?? 0}
+                               </div>
+                               <div className="text-slate-500">
+                                   HP: {char.attributes['health']?.value ?? char.attributes['健康']?.value ?? 0}
+                               </div>
+                           </div>
+                           
+                           <p className="text-[10px] text-slate-400 line-clamp-3 italic bg-slate-900 p-2 rounded border border-slate-800/50">
+                               "{char.description}"
+                           </p>
+                           
+                           <div className="mt-auto grid grid-cols-2 gap-2 pt-2">
+                               <button onClick={() => openWindow('char', char)} className="flex items-center justify-center gap-1 p-1.5 bg-slate-800 hover:bg-indigo-600 text-slate-400 hover:text-white rounded transition-colors text-xs">
+                                   <Edit2 size={12}/> 编辑
+                               </button>
+                               <button 
+                                   onClick={() => handleDelete(char.id)}
+                                   className={`flex items-center justify-center gap-1 p-1.5 rounded transition-colors text-xs ${deleteConfirmId === char.id ? 'bg-red-600 text-white animate-pulse' : 'bg-slate-800 hover:bg-red-900/50 text-slate-400 hover:text-red-400'}`}
+                               >
+                                   {deleteConfirmId === char.id ? "确认?" : <><Trash2 size={12}/> 删除</>}
+                                </button>
+                           </div>
+                       </div>
+                  </div>
+              ))}
+          </HorizontalScrollContainer>
+
+          {/* Render the imported Gen Window conditionally */}
+          {isGenModalOpen && (
+              <AiGenWindow 
+                  state={state} 
+                  updateState={updateState} 
+                  addLog={addLog} 
+                  onClose={() => setGenModalOpen(false)} 
+                  isPlayerMode={false}
+                  addDebugLog={addDebugLog} // Pass it down
+              />
+          )}
+      </div>
+  </div>
+)};
+
+export const CardPoolWindow: React.FC<PoolWindowProps> = ({ winId, state, updateState, closeWindow, openWindow, addLog, selectedCharId, onSaveCard }) => {
+  const [editingPoolCard, setEditingPoolCard] = useState<Card | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [showPublicOnly, setShowPublicOnly] = useState(true);
+
+  const displayCards = state.cardPool.filter(c => {
+      if (showPublicOnly) return c.visibility !== AttributeVisibility.PRIVATE;
+      return true;
+  });
+
+  const handleDelete = (cardId: string) => {
+      if (deleteConfirmId === cardId) {
+          updateState(prev => ({
+              ...prev,
+              cardPool: prev.cardPool.filter(c => c.id !== cardId)
+          }));
+          setDeleteConfirmId(null);
+          addLog("系统: 卡牌已从公共池中永久移除。");
+      } else {
+          setDeleteConfirmId(cardId);
+          setTimeout(() => setDeleteConfirmId(prev => prev === cardId ? null : prev), 3000);
+      }
+  };
+
+  if (editingPoolCard) {
+      return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+               <CardEditor 
+                   initialCard={editingPoolCard}
+                   gameState={state}
+                   onSave={(c) => { if(onSaveCard) onSaveCard(c); setEditingPoolCard(null); }}
+                   onClose={() => setEditingPoolCard(null)}
+               />
+          </div>
+      )
+  }
+
+  return (
+  <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+      <div className="w-full max-w-5xl h-[450px] bg-slate-900 border border-slate-700 shadow-2xl rounded-lg flex flex-col">
+          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950 rounded-t-lg shrink-0">
+              <div className="flex items-center gap-4">
+                  <h2 className="font-bold text-lg text-slate-100 flex items-center gap-2"><Layers size={18}/> 游戏卡池 (Card Pool)</h2>
+                  
+                  <button 
+                      onClick={() => setShowPublicOnly(!showPublicOnly)}
+                      className={`
+                          flex items-center gap-2 px-3 py-1 rounded text-xs font-bold border transition-colors whitespace-nowrap
+                          ${showPublicOnly ? 'bg-indigo-900/30 border-indigo-500 text-indigo-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:text-slate-300'}
+                      `}
+                      title="切换显示范围"
+                  >
+                      {showPublicOnly ? <Eye size={12}/> : <EyeOff size={12}/>}
+                      {showPublicOnly ? `公开卡牌` : "全部卡牌"}
+                  </button>
+              </div>
+              <button onClick={() => closeWindow(winId)} className="text-slate-400 hover:text-white"><X size={20}/></button>
+          </div>
+          
+          <HorizontalScrollContainer>
+              <div 
+                  onClick={() => openWindow('card')}
+                  className="min-w-[200px] w-[200px] h-full border-2 border-dashed border-slate-700 rounded-lg flex flex-col items-center justify-center text-slate-500 hover:text-indigo-400 hover:border-indigo-400 cursor-pointer bg-slate-900/30 hover:bg-slate-900 transition-colors snap-center"
+              >
+                  <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mb-3">
+                      <Plus size={24}/>
+                  </div>
+                  <span className="text-xs font-bold">新建卡牌</span>
+              </div>
+
+              {displayCards.map((card, i) => (
+                  <div key={i} className="min-w-[200px] w-[200px] h-full bg-slate-950 border-2 border-slate-800 rounded-lg p-0 flex flex-col relative group hover:border-indigo-500 hover:-translate-y-1 transition-all shadow-md snap-center">
+                       <div className="h-[120px] bg-slate-900 relative overflow-hidden border-b border-slate-800">
+                            {card.imageUrl ? (
+                                <img src={card.imageUrl} className="w-full h-full object-cover opacity-80" style={{ imageRendering: 'pixelated' }}/>
+                            ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-slate-800 text-slate-700">
+                                    {card.itemType === 'consumable' ? <Box size={32}/> : <Zap size={32}/>}
+                                </div>
+                            )}
+                            <div className="absolute bottom-0 inset-x-0 bg-slate-900/90 p-2 flex justify-between items-center border-t border-slate-800">
+                                <span className="font-bold text-xs text-slate-100 truncate flex-1">{card.name}</span>
+                                {card.itemType === 'consumable' ? <Box size={12} className="text-blue-400 shrink-0"/> : <Zap size={12} className="text-amber-400 shrink-0"/>}
+                            </div>
+                            <div className="absolute top-2 left-2 bg-yellow-900/80 text-yellow-400 text-[10px] px-1.5 py-0.5 rounded border border-yellow-600 font-bold flex items-center gap-1">
+                                <Coins size={10}/> {card.cost}
+                            </div>
+                            {card.visibility === AttributeVisibility.PRIVATE && (
+                                <div className="absolute top-2 right-2 bg-red-900/80 text-red-200 text-[10px] px-1.5 py-0.5 rounded border border-red-700 font-bold flex items-center gap-1">
+                                    <EyeOff size={10}/>
+                                </div>
+                            )}
+                       </div>
+
+                       <div className="p-3 flex-1 flex flex-col gap-2">
+                           <p className="text-[10px] text-slate-400 line-clamp-3 min-h-[40px]">
+                               {card.description}
+                           </p>
+                           <div className="flex flex-wrap gap-1 content-start flex-1">
+                                {card.effects.slice(0, 3).map((e, ei) => (
+                                    <span key={ei} className="text-[9px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700 truncate max-w-full">
+                                        {e.targetAttribute} {Number(e.value) > 0 ? '+' : ''}{e.value}
+                                    </span>
+                                ))}
+                                {card.effects.length > 3 && <span className="text-[9px] text-slate-600">...</span>}
+                           </div>
+
+                           <div className="grid grid-cols-3 gap-1 pt-2 border-t border-slate-800 mt-auto">
+                                <button onClick={() => setEditingPoolCard(card)} className="flex items-center justify-center p-1.5 bg-slate-800 hover:bg-indigo-600 text-slate-400 hover:text-white rounded transition-colors">
+                                    <Edit2 size={12}/>
+                                </button>
+                                <button 
+                                    onClick={() => handleDelete(card.id)}
+                                    className={`flex items-center justify-center p-1.5 rounded transition-colors ${deleteConfirmId === card.id ? 'bg-red-600 text-white animate-pulse' : 'bg-slate-800 hover:bg-red-900/50 text-slate-400 hover:text-red-400'}`}
+                                >
+                                    {deleteConfirmId === card.id ? "!" : <Trash2 size={12}/>}
+                                </button>
+                                {selectedCharId && (
+                                    <button 
+                                        className="flex items-center justify-center p-1.5 bg-indigo-700 hover:bg-indigo-500 text-white rounded transition-colors"
+                                        title="给予选中角色"
+                                        onClick={() => {
+                                            updateState(prev => ({
+                                                ...prev,
+                                                characters: {
+                                                    ...prev.characters,
+                                                    [selectedCharId!]: {
+                                                        ...prev.characters[selectedCharId!],
+                                                        inventory: [...prev.characters[selectedCharId!].inventory, card.id]
+                                                    }
+                                                }
+                                            }));
+                                            addLog(`系统: ${card.name} 已给予 ${state.characters[selectedCharId!].name}。`);
+                                        }}
+                                    >
+                                        <Backpack size={12}/>
+                                    </button>
+                                )}
+                           </div>
+                       </div>
+                  </div>
+              ))}
+          </HorizontalScrollContainer>
+      </div>
+  </div>
+)};
+
+export const LocationPoolWindow: React.FC<PoolWindowProps> = ({ winId, state, updateState, closeWindow, addLog }) => {
+    const [editingLocId, setEditingLocId] = useState<string | null>(null);
+    const [editData, setEditData] = useState<Partial<MapLocation>>({});
+    const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+    // Only show known locations
+    const locations = (Object.values(state.map.locations) as MapLocation[]).filter(l => l.isKnown);
+
+    const handleEditStart = (loc: MapLocation) => {
+        setEditingLocId(loc.id);
+        // Ensure attributes exist for editing
+        setEditData({ 
+            ...loc, 
+            attributes: loc.attributes || {}
+        });
+    };
+
+    const handleDelete = (locId: string, locName: string) => {
+        if (deleteConfirmId === locId) {
+            updateState(prev => {
+                // 1. Filter Locations
+                const newLocations = { ...prev.map.locations };
+                delete newLocations[locId];
+
+                // 2. Find and Remove Characters at this location
+                const newChars = { ...prev.characters };
+                const newPositions = { ...prev.map.charPositions };
+                const removedChars: string[] = [];
+
+                Object.keys(prev.map.charPositions).forEach(charId => {
+                    if (newPositions[charId].locationId === locId) {
+                        delete newChars[charId];
+                        delete newPositions[charId];
+                        removedChars.push(charId);
+                    }
+                });
+
+                // 3. Update Round Order if removed characters were in it
+                let newCurrentOrder = prev.round.currentOrder.filter(id => !removedChars.includes(id));
+                let newDefaultOrder = prev.round.defaultOrder.filter(id => !removedChars.includes(id));
+
+                // 4. If Active Location was deleted, reset to safe default if possible
+                let newActiveLoc = prev.map.activeLocationId;
+                if (newActiveLoc === locId) {
+                    newActiveLoc = Object.keys(newLocations)[0] || ""; 
+                }
+
+                return {
+                    ...prev,
+                    map: {
+                        ...prev.map,
+                        locations: newLocations,
+                        charPositions: newPositions,
+                        activeLocationId: newActiveLoc
+                    },
+                    characters: newChars,
+                    round: {
+                        ...prev.round,
+                        currentOrder: newCurrentOrder,
+                        defaultOrder: newDefaultOrder
+                    }
+                };
+            });
+            
+            addLog(`系统: 地点 [${locName}] 及其中的所有角色已被彻底移除。`);
+            setDeleteConfirmId(null);
+        } else {
+            setDeleteConfirmId(locId);
+            setTimeout(() => setDeleteConfirmId(prev => prev === locId ? null : prev), 3000);
+        }
+    };
+
+    const handleSave = () => {
+        if (editingLocId && editData) {
+            updateState(prev => ({
+                ...prev,
+                map: {
+                    ...prev.map,
+                    locations: {
+                        ...prev.map.locations,
+                        [editingLocId]: { 
+                            ...prev.map.locations[editingLocId], 
+                            ...editData,
+                            // Ensure coords update properly, Z is constant usually
+                            coordinates: {
+                                ...prev.map.locations[editingLocId].coordinates,
+                                x: editData.coordinates?.x || prev.map.locations[editingLocId].coordinates.x,
+                                y: editData.coordinates?.y || prev.map.locations[editingLocId].coordinates.y
+                            }
+                        }
+                    }
+                }
+            }));
+            setEditingLocId(null);
+            addLog("系统: 地点信息已更新。");
+        }
+    };
+
+    // Attribute Helpers for Location
+    const updateAttr = (key: string, field: keyof GameAttribute, val: any) => {
+        setEditData(prev => ({
+            ...prev,
+            attributes: {
+                ...prev.attributes,
+                [key]: { ...prev.attributes![key], [field]: val }
+            }
+        }));
+    };
+
+    const addAttribute = () => {
+        const id = `loc_attr_${Date.now()}`;
+        setEditData(prev => ({
+            ...prev,
+            attributes: {
+                ...prev.attributes,
+                [id]: { id, name: '新属性', type: AttributeType.TEXT, value: '', visibility: AttributeVisibility.PUBLIC }
+            }
+        }));
+    };
+
+    const removeAttribute = (key: string) => {
+        const newAttrs = { ...editData.attributes };
+        delete newAttrs[key];
+        setEditData(prev => ({ ...prev, attributes: newAttrs }));
+    };
+
+    const refreshAvatar = () => {
+        setEditData(prev => ({ ...prev, avatarUrl: generateRandomFlagAvatar(true) }));
+    };
+
+    return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+        <div className="w-full max-w-5xl h-[550px] bg-slate-900 border border-slate-700 shadow-2xl rounded-lg flex flex-col">
+            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950 rounded-t-lg shrink-0">
+                <h2 className="font-bold text-lg text-slate-100 flex items-center gap-2"><MapPin size={18}/> 已探索地点 (Known Locations)</h2>
+                <button onClick={() => closeWindow(winId)} className="text-slate-400 hover:text-white"><X size={20}/></button>
+            </div>
+            
+            <HorizontalScrollContainer>
+                {locations
+                    .sort((a,b) => a.name.localeCompare(b.name))
+                    .map((loc) => (
+                    <div key={loc.id} className="min-w-[400px] w-[400px] h-full bg-slate-950 border border-slate-800 rounded-lg flex flex-col overflow-hidden relative shadow-lg snap-center">
+                         {editingLocId === loc.id ? (
+                             <div className="flex-1 p-4 flex flex-col gap-3 bg-slate-900 overflow-y-auto">
+                                 {/* Avatar Editor for Location */}
+                                 <div className="flex items-start gap-3 mb-2 pb-2 border-b border-slate-800">
+                                     <ImageUploader 
+                                         value={editData.avatarUrl || ''} 
+                                         onChange={url => setEditData({...editData, avatarUrl: url})} 
+                                     />
+                                     <Button size="sm" variant="secondary" onClick={refreshAvatar} title="随机生成抽象旗帜" className="h-8">
+                                         <Sparkles size={14} className="mr-1"/> 随机生成
+                                     </Button>
+                                 </div>
+
+                                 <div className="flex gap-2">
+                                     <div className="flex-1">
+                                         <Label>Name</Label>
+                                         <Input value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} />
+                                     </div>
+                                     <div className="w-24">
+                                         <Label>Coordinates</Label>
+                                         <div className="flex gap-1">
+                                            <Input type="number" placeholder="X" value={editData.coordinates?.x} onChange={e => setEditData({...editData, coordinates: {...editData.coordinates!, x: parseFloat(e.target.value)}})} className="text-xs px-1"/>
+                                            <Input type="number" placeholder="Y" value={editData.coordinates?.y} onChange={e => setEditData({...editData, coordinates: {...editData.coordinates!, y: parseFloat(e.target.value)}})} className="text-xs px-1"/>
+                                         </div>
+                                     </div>
+                                 </div>
+                                 
+                                 <Label>Description</Label>
+                                 <TextArea className="h-16" value={editData.description} onChange={e => setEditData({...editData, description: e.target.value})} />
+                                 
+                                 <div className="border-t border-slate-800 pt-2 grid grid-cols-1 gap-4">
+                                     <div>
+                                         <div className="flex justify-between items-center mb-2">
+                                             <Label>Attributes</Label>
+                                             <Button size="sm" variant="secondary" onClick={addAttribute}><Plus size={12}/></Button>
+                                         </div>
+                                         <div className="space-y-2 max-h-[100px] overflow-y-auto">
+                                             {(Object.entries(editData.attributes || {}) as [string, GameAttribute][]).map(([key, attr]) => (
+                                                <div key={key} className="flex gap-1 items-center bg-slate-900 p-1.5 rounded border border-slate-800">
+                                                    <Input className="h-6 text-xs w-16" value={attr.name} onChange={e => updateAttr(key, 'name', e.target.value)} placeholder="Name"/>
+                                                    <Input className="h-6 text-xs flex-1" value={attr.value} onChange={e => updateAttr(key, 'value', e.target.value)} placeholder="Val"/>
+                                                    <button onClick={() => removeAttribute(key)} className="text-slate-500 hover:text-red-400"><Trash2 size={12}/></button>
+                                                </div>
+                                             ))}
+                                         </div>
+                                     </div>
+                                 </div>
+
+                                 <div className="flex justify-end gap-2 mt-auto pt-4">
+                                     <Button variant="secondary" size="sm" onClick={() => setEditingLocId(null)}>取消</Button>
+                                     <Button size="sm" onClick={handleSave}>保存</Button>
+                                 </div>
+                             </div>
+                         ) : (
+                             <>
+                                 <div className={`h-20 flex items-center justify-center border-b border-slate-800 relative overflow-hidden ${loc.isKnown ? 'bg-teal-900/20' : 'bg-slate-900'}`}>
+                                     {loc.avatarUrl ? (
+                                         <img src={loc.avatarUrl} className="w-full h-full object-cover absolute inset-0 opacity-60" style={{ imageRendering: 'pixelated' }}/>
+                                     ) : (
+                                         <MapPin size={32} className={`relative z-10 ${loc.isKnown ? "text-teal-500" : "text-slate-600"}`} />
+                                     )}
+                                     <div className="absolute top-2 right-2 text-[10px] font-mono text-slate-300 bg-black/70 px-1 rounded z-20">
+                                         {loc.coordinates.x.toFixed(0)}, {loc.coordinates.y.toFixed(0)}
+                                     </div>
+                                     {loc.id === state.map.activeLocationId && (
+                                         <div className="absolute top-2 left-2 bg-red-600 text-white text-[9px] px-1.5 rounded font-bold z-20">ACTIVE</div>
+                                     )}
+                                 </div>
+                                 <div className="p-4 flex-1 flex flex-col">
+                                     <div className="flex justify-between items-start mb-1">
+                                         <h3 className="font-bold text-slate-200">{loc.isKnown ? loc.name : "未知区域"}</h3>
+                                         <button 
+                                             onClick={() => handleDelete(loc.id, loc.name)} 
+                                             className={`p-1 rounded text-[10px] flex items-center gap-1 transition-colors ${deleteConfirmId === loc.id ? 'bg-red-600 text-white' : 'text-slate-500 hover:text-red-400 bg-slate-900'}`}
+                                             title="删除地点 (包含其中角色)"
+                                         >
+                                             {deleteConfirmId === loc.id ? "确认?" : <Trash2 size={14}/>}
+                                         </button>
+                                     </div>
+                                     <p className="text-xs text-slate-500 mb-4 h-16 overflow-y-auto border border-slate-800/50 p-2 rounded bg-slate-900">
+                                         {loc.isKnown ? loc.description : "等待探索..."}
+                                     </p>
+                                     
+                                     <div className="flex-1 grid grid-cols-1 gap-2 mb-2 max-h-[140px] overflow-hidden">
+                                         <div className="space-y-1 overflow-y-auto pr-2">
+                                             <h4 className="text-[10px] font-bold text-slate-400 uppercase mb-1">Attributes</h4>
+                                             {loc.attributes && Object.values(loc.attributes).map(attr => (
+                                                 <div key={attr.id} className="flex justify-between text-[10px] text-slate-500 border-b border-slate-800/50 pb-0.5">
+                                                     <span className="truncate max-w-[60px]">{attr.name}</span>
+                                                     <span className="text-slate-300">{attr.value}</span>
+                                                 </div>
+                                             ))}
+                                         </div>
+                                     </div>
+
+                                     <div className="flex gap-2 mt-auto">
+                                         <Button variant="secondary" size="sm" className="flex-1" onClick={() => handleEditStart(loc)}>
+                                             <Edit2 size={12} className="mr-1"/> 编辑
+                                         </Button>
+                                         {loc.id !== state.map.activeLocationId && (
+                                             <Button size="sm" className="flex-1 bg-indigo-600 hover:bg-indigo-500" onClick={() => {
+                                                 updateState(prev => ({ ...prev, map: { ...prev.map, activeLocationId: loc.id } }));
+                                                 addLog(`系统: 强制转移至 [${loc.isKnown ? loc.name : "未知区域"}]`);
+                                             }}>
+                                                 <Navigation size={12} className="mr-1"/> 移动
+                                             </Button>
+                                         )}
+                                     </div>
+                                 </div>
+                             </>
+                         )}
+                    </div>
+                ))}
+                {locations.length === 0 && (
+                    <div className="flex items-center justify-center w-full text-slate-500 italic">
+                        暂无已探索地点。请在游戏中移动以发现新区域。
+                    </div>
+                )}
+            </HorizontalScrollContainer>
+        </div>
+    </div>
+  )};
