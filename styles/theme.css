@@ -1,0 +1,106 @@
+
+:root {
+  /* 
+     === PRE-CALCULATED DEFAULT THEME (Dark / Warm) ===
+     Base: Orange, Saturation 0.15
+     Primary: Yellow, Saturation 0.35
+     
+     These literal OKLCH values match the calculations in themeService.ts exactly,
+     preventing the "Flash of Unstyled Theme" (FOUT) on startup.
+  */
+
+  /* --- LAYOUT & SURFACES --- */
+  /* Base: Orange-950 (Desaturated) */
+  --bg-app: oklch(0.266 0.012 36.26);
+  
+  /* Surface: Orange-900 (Desaturated) */
+  --bg-surface: oklch(0.408 0.018 38.17);
+  
+  /* Highlight: Orange-800 (Desaturated) */
+  --bg-surface-highlight: oklch(0.47 0.024 37.30);
+  
+  /* Light: Orange-900 (Desaturated) */
+  --bg-surface-light: oklch(0.408 0.018 38.17);
+
+  /* Overlays */
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  /* --- STORY LOG --- */
+  /* Background: Orange-900 (Sat 0.2) */
+  --bg-story: oklch(0.408 0.025 38.17);
+  /* Text: Slate-200 (Sat 1.0) */
+  --text-story: oklch(0.929 0.013 255.51);
+
+  /* --- SHADOWS --- */
+  --shadow-modal: 
+    0 25px 50px -12px rgba(0, 0, 0, 0.5), 
+    0 10px 25px -5px rgba(0, 0, 0, 0.3);
+
+  /* --- BORDERS & DIVIDERS --- */
+  /* Base: Orange-950 (Desaturated) - Relative to Surface 900 */
+  --border-base: oklch(0.266 0.012 36.26);
+  --border-highlight: oklch(0.266 0.012 36.26);
+  
+  /* Active: Yellow-500 (Sat 0.35) */
+  --border-active: oklch(0.795 0.064 86.05);
+
+  /* --- TYPOGRAPHY (Base Sat 0.15) --- */
+  /* Body: Orange-200 */
+  --text-body: oklch(0.901 0.011 70.70);
+  /* Muted: Orange-400 */
+  --text-muted: oklch(0.75 0.027 55.93);
+  /* Faint: Orange-600 */
+  --text-faint: oklch(0.646 0.033 41.12);
+  /* Highlight: Orange-50 */
+  --text-highlight: oklch(0.98 0.002 73.68);
+  /* Inverted: Orange-950 */
+  --text-inverted: oklch(0.266 0.012 36.26);
+
+  /* --- BRAND & INTERACTION (Primary Sat 0.35) --- */
+  /* Primary Base: Yellow-400 */
+  --primary-base: oklch(0.852 0.070 91.94);
+  /* Primary Hover: Yellow-300 */
+  --primary-hover: oklch(0.905 0.064 98.11);
+  /* Primary Active: Yellow-500 */
+  --primary-active: oklch(0.795 0.064 86.05);
+  --primary-fg: #000000;
+
+  /* Secondary Base: Yellow-900 */
+  --secondary-base: oklch(0.421 0.033 57.71);
+  /* Secondary Hover: Yellow-800 */
+  --secondary-hover: oklch(0.476 0.040 61.91);
+  --secondary-fg: #ffffff;
+
+  /* --- FUNCTIONAL COLORS --- */
+  /* Danger (Red) - Full Saturation */
+  --danger-base: var(--color-red-600);
+  --danger-hover: var(--color-red-500);
+  --danger-fg: var(--color-white);
+
+  /* Success (Green) */
+  --success-base: var(--color-green-600);
+  --success-fg: var(--color-green-400);
+
+  /* Warning (Amber) */
+  --warning-base: var(--color-amber-600);
+  --warning-fg: var(--color-amber-400);
+
+  /* Info uses Secondary Hue (Yellow) but distinct */
+  /* Yellow-600 Sat 0.35 */
+  --info-base: oklch(0.681 0.057 75.83);
+  /* Yellow-200 Sat 0.35 */
+  --info-fg: oklch(0.945 0.045 101.54);
+
+  /* --- EXTENDED SEMANTICS (Full Saturation) --- */
+  --libido-base: var(--color-pink-500);
+  --libido-fg: var(--color-pink-100);
+
+  --dopamine-base: var(--color-yellow-500);
+  --dopamine-fg: var(--color-yellow-100);
+
+  --endorphin-base: var(--color-orange-500);
+  --endorphin-fg: var(--color-orange-100);
+
+  --oxytocin-base: var(--color-teal-500);
+  --oxytocin-fg: var(--color-teal-100);
+}

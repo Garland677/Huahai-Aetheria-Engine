@@ -70,3 +70,75 @@ export function advanceWorldTime(currentStr: string, deltaSeconds: number): stri
     // Output Format: YYYY:MM:DD:HH:MM:SS
     return `${y}:${pad(m)}:${pad(d)}:${pad(h)}:${pad(mi)}:${pad(s)}`;
 }
+
+// --- New Utilities for Narrative Time Delta ---
+
+const parseAnyTimeFormat = (str: string): Date | null => {
+    if (!str) return null;
+    
+    // Type 1: Internal Format (YYYY:MM:DD:HH:MM:SS)
+    // 2077:01:03:06:33:00
+    if (str.includes(':')) {
+        const parts = str.split(/[:\-\/ ]/).map(s => parseInt(s, 10));
+        if (parts.length >= 3) {
+            return new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0);
+        }
+    }
+
+    // Type 2: Chinese Log Format (YYYY年MM月DD日HH时MM分)
+    // Robust regex: Allow spaces between units
+    const cnMatch = str.match(/(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日(?:\s*(\d+)\s*时)?(?:\s*(\d+)\s*分)?/);
+    if (cnMatch) {
+        return new Date(
+            parseInt(cnMatch[1]), 
+            parseInt(cnMatch[2]) - 1, 
+            parseInt(cnMatch[3]), 
+            parseInt(cnMatch[4] || '0'), 
+            parseInt(cnMatch[5] || '0')
+        );
+    }
+    
+    return null;
+};
+
+export const getNaturalTimeDelta = (currentStr: string, pastStr: string): string => {
+    const curr = parseAnyTimeFormat(currentStr);
+    const past = parseAnyTimeFormat(pastStr);
+
+    if (!curr || !past) return "未知时间";
+
+    // Calculate diff in seconds
+    let diff = Math.max(0, (curr.getTime() - past.getTime()) / 1000);
+
+    if (diff <= 0) return "片刻"; // Truly zero difference
+
+    // Approximate unit calculations
+    const years = Math.floor(diff / 31536000); // 365 days
+    diff %= 31536000;
+    
+    const months = Math.floor(diff / 2592000); // 30 days
+    diff %= 2592000;
+    
+    const days = Math.floor(diff / 86400);
+    diff %= 86400;
+    
+    const hours = Math.floor(diff / 3600);
+    diff %= 3600;
+    
+    const minutes = Math.floor(diff / 60);
+    const seconds = Math.floor(diff % 60);
+
+    let result = "";
+    if (years > 0) result += `${years}年`;
+    if (months > 0) result += `${months}个月`;
+    if (days > 0) result += `${days}天`;
+    if (hours > 0) result += `${hours}小时`;
+    if (minutes > 0) result += `${minutes}分钟`;
+    
+    // If less than a minute, show seconds to avoid "片刻" on short steps
+    if (result === "" && seconds > 0) {
+        result += `${seconds}秒`;
+    }
+
+    return result || "片刻";
+};

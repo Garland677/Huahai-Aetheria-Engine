@@ -1,0 +1,90 @@
+
+.glass-panel {
+  position: relative;
+  
+  /* 
+     底色修复：
+     使用 color-mix 混合当前主题的 surface 颜色与透明度。
+     稍微增加了不透明度以补偿移除了 brightness/saturate 滤镜后的视觉效果。
+  */
+  background-color: color-mix(in srgb, var(--bg-surface), transparent 80%);
+  
+  /* 外部投影保持立体感 - 使用统一的主题变量 */
+  box-shadow: var(--shadow-modal);
+    
+  /* 物理边框 - 使用自适应边框颜色 */
+  border: 1px solid color-mix(in srgb, var(--border-base), transparent 50%);
+  border-radius: 24px;
+  
+  overflow: hidden;
+  color: var(--text-body);
+  
+  /* 
+     PERFORMANCE OPTIMIZATION:
+     1. translate3d: 强制开启 GPU 硬件加速层。
+     2. contain: paint layout: 告诉浏览器此元素的绘制和布局不影响外部，减少重排重绘范围。
+  */
+  transform: translate3d(0,0,0);
+  contain: paint layout;
+}
+
+/* 
+   RENDER LAYER ISOLATION (渲染层隔离)
+   我们将 backdrop-filter 移至伪元素。
+   这样，当 .glass-panel 内部的内容（如滚动的文字、列表）发生变化时，
+   浏览器不需要重新计算背景滤镜，因为它位于一个独立的、静态的 z-index 层级。
+   配合 index.html 中的 filterRes="120"，这实现了“低频/低分率缓冲区”效果。
+*/
+.glass-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1; /* 位于内容之下 */
+  
+  /* 仅应用 SVG 滤镜，移除 CSS 饱和度/亮度调整以减少 GPU Pass */
+  backdrop-filter: url(#chromatic-aberration);
+  -webkit-backdrop-filter: url(#chromatic-aberration);
+  
+  /* 继承圆角 */
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* 
+   针对内部元素的微调 
+   (保持通透度)
+*/
+.glass-panel .bg-surface-highlight {
+  background-color: color-mix(in srgb, var(--bg-surface-highlight), transparent 80%);
+  border-bottom: 1px solid var(--border-base);
+}
+
+.glass-panel .bg-surface-light {
+  background-color: color-mix(in srgb, var(--bg-surface-light), transparent 85%);
+}
+
+/* 
+   输入框适配：
+   不再强制黑色背景和白色文字，而是跟随主题色调 
+*/
+.glass-panel input, 
+.glass-panel textarea, 
+.glass-panel select {
+  background-color: color-mix(in srgb, var(--bg-surface-light), transparent 50%) !important;
+  /* 移除输入框上的 backdrop-filter，避免嵌套滤镜导致的指数级性能下降 */
+  /* backdrop-filter: blur(4px); */ 
+  border-color: var(--border-base) !important;
+  color: var(--text-body) !important;
+}
+
+.glass-panel input:focus, 
+.glass-panel textarea:focus, 
+.glass-panel select:focus {
+  border-color: var(--primary-base) !important;
+  background-color: color-mix(in srgb, var(--bg-surface), transparent 20%) !important;
+  color: var(--text-highlight) !important;
+}
+
+.glass-solid {
+  background-color: var(--bg-surface);
+}

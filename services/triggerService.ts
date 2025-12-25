@@ -1,10 +1,19 @@
 
 import { Trigger, TriggerCondition, GameState, TriggerPhase, Character, Card, LogEntry } from "../types";
+import { replaceGlobalVariables } from "./ai/promptUtils";
 
 // Local Helper: Get Global Memory (Extracted from aiService to avoid circular dependency)
-const getGlobalMemory = (history: LogEntry[], currentRound: number, roundsToKeep: number = 20): string => {
+// Updated to accept tokenLimit for consistent truncation
+const getGlobalMemory = (history: LogEntry[], currentRound: number, roundsToKeep: number = 20, tokenLimit: number = 64000): string => {
+    // Heuristic: Reserve about 4000 tokens for system prompt + world state + misc context
+    const budget = Math.max(1000, tokenLimit - 4000);
+
     const minRound = Math.max(1, currentRound - roundsToKeep);
-    return history.filter(e => e.round >= minRound).slice(-50).map(entry => entry.content).join('\n');
+    return history
+        .filter(e => e.round >= minRound)
+        .slice(-50)
+        .map(entry => entry.content)
+        .join('\n');
 };
 
 // Helper: Compare logic with enhanced type safety for number-strings
@@ -68,7 +77,8 @@ export interface TriggerResult {
 export const evaluateTriggers = (
     gameState: GameState, 
     phase: TriggerPhase,
-    onTriggerUpdate?: (id: string, updates: Partial<Trigger>) => void
+    onTriggerUpdate?: (id: string, updates: Partial<Trigger>) => void,
+    contextCharId?: string
 ): TriggerResult => {
     const allTriggers = Object.values(gameState.triggers || {});
 
@@ -98,21 +108,29 @@ export const evaluateTriggers = (
                 case 'char_attr': {
                     // Target Resolution
                     let targets: Character[] = [];
-                    if (cond.locationId === 'all' || !cond.locationId) {
-                        targets = Object.values(gameState.characters);
-                    } else {
-                        targets = Object.values(gameState.characters).filter(c => 
-                            gameState.map.charPositions[c.id]?.locationId === cond.locationId
-                        );
-                    }
                     
-                    if (cond.characterId && cond.characterId !== 'all') {
-                        targets = targets.filter(c => c.id === cond.characterId);
+                    if (cond.characterId === 'current') {
+                        // Dynamic Context Resolution
+                        const targetId = contextCharId || gameState.round.activeCharId;
+                        if (targetId && gameState.characters[targetId]) {
+                            targets = [gameState.characters[targetId]];
+                        }
+                    } else {
+                        // Standard Selection
+                        if (cond.locationId === 'all' || !cond.locationId) {
+                            targets = Object.values(gameState.characters);
+                        } else {
+                            targets = Object.values(gameState.characters).filter(c => 
+                                gameState.map.charPositions[c.id]?.locationId === cond.locationId
+                            );
+                        }
+                        
+                        if (cond.characterId && cond.characterId !== 'all') {
+                            targets = targets.filter(c => c.id === cond.characterId);
+                        }
                     }
 
-                    // Check Logic: "exists" semantics
-                    // If we are checking "Value < 100", and we find ANY character matching, the condition is met.
-                    // This creates a "There exists an X such that..." trigger.
+                    // Check Logic
                     for (const char of targets) {
                         const val = getAttrValue(char, cond.targetName || "");
                         if (val !== undefined && compare(val, cond.comparator as string, cond.value)) {
@@ -125,10 +143,18 @@ export const evaluateTriggers = (
                 }
                 case 'char_card': {
                     let targets: Character[] = [];
-                    if (cond.locationId === 'all' || !cond.locationId) targets = Object.values(gameState.characters);
-                    else targets = Object.values(gameState.characters).filter(c => gameState.map.charPositions[c.id]?.locationId === cond.locationId);
                     
-                    if (cond.characterId && cond.characterId !== 'all') targets = targets.filter(c => c.id === cond.characterId);
+                    if (cond.characterId === 'current') {
+                        const targetId = contextCharId || gameState.round.activeCharId;
+                        if (targetId && gameState.characters[targetId]) {
+                            targets = [gameState.characters[targetId]];
+                        }
+                    } else {
+                        if (cond.locationId === 'all' || !cond.locationId) targets = Object.values(gameState.characters);
+                        else targets = Object.values(gameState.characters).filter(c => gameState.map.charPositions[c.id]?.locationId === cond.locationId);
+                        
+                        if (cond.characterId && cond.characterId !== 'all') targets = targets.filter(c => c.id === cond.characterId);
+                    }
 
                     const searchName = (cond.targetName || "").toLowerCase();
 
@@ -209,7 +235,8 @@ export const evaluateTriggers = (
                     // Get recent history text
                     const rounds = cond.historyRounds || 5;
                     const currentRound = gameState.round.roundNumber;
-                    const historyText = getGlobalMemory(gameState.world.history, currentRound, rounds);
+                    // FIX: Pass maxInputTokens from settings to respect memory limits
+                    const historyText = getGlobalMemory(gameState.world.history, currentRound, rounds, gameState.appSettings.maxInputTokens);
                     const search = (cond.value || "").toString();
                     const found = historyText.includes(search);
                     
@@ -252,13 +279,19 @@ export const evaluateTriggers = (
     const combinedLogs: string[] = [];
 
     passedTriggers.forEach(({ trigger, values }) => {
-        // Macro Replacement Helper
+        // Macro Replacement Helper using shared util
         const replaceMacros = (text: string): string => {
             let result = text;
+            
+            // 1. Trigger Conditions (Local scope)
             Object.entries(values).forEach(([key, val]) => {
                 // Replace {{condition N}}
                 result = result.split(`{{${key}}}`).join(String(val));
             });
+
+            // 2. Global Variables (Global scope) via Shared Util
+            result = replaceGlobalVariables(result, gameState.appSettings);
+
             return result;
         };
 

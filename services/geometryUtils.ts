@@ -59,6 +59,8 @@ interface PolygonConfig {
  * Generates an irregular polygon with Radial Ray Clipping.
  * Instead of shrinking the whole polygon upon overlap, it trims individual vertices
  * that extend into existing polygons (avoidPolygons).
+ * 
+ * UPDATE: Uses Valtr Algorithm to ensure the initial shape is a Convex Polygon.
  */
 export const generateIrregularPolygon = (
     centerX: number, 
@@ -102,28 +104,113 @@ export const generateIrregularPolygon = (
     
     const baseRadius = Math.sqrt(area / Math.PI);
     
-    // Higher vertex count provides smoother clipping against straight edges
-    const numVerts = Math.max(40, config.vertexCountMin + Math.floor(rng.next() * config.vertexCountVar) + 20);
-    const vertices: {x:number, y:number}[] = [];
+    // Higher vertex count provides smoother clipping
+    const numVerts = Math.max(20, config.vertexCountMin + Math.floor(rng.next() * config.vertexCountVar));
     
-    // 3. Generate & Clip Vertices
-    for(let i = 0; i < numVerts; i++) {
-        const theta = (i / numVerts) * Math.PI * 2;
+    // --- 3. GENERATE CONVEX POLYGON (Valtr Algorithm) ---
+    
+    // A. Generate random sorted X offsets
+    const xVal: number[] = [];
+    for(let i=0; i<numVerts; i++) xVal.push(rng.next());
+    xVal.sort((a,b) => a-b);
+    
+    const xMin = xVal[0];
+    const xMax = xVal[numVerts-1];
+    
+    // B. Generate random sorted Y offsets
+    const yVal: number[] = [];
+    for(let i=0; i<numVerts; i++) yVal.push(rng.next());
+    yVal.sort((a,b) => a-b);
+    
+    const yMin = yVal[0];
+    const yMax = yVal[numVerts-1];
+
+    // C. Divide X into two chains
+    const xChain1: number[] = [xMin];
+    const xChain2: number[] = [xMin];
+    for (let i = 1; i < numVerts - 1; i++) {
+        if (rng.next() < 0.5) xChain1.push(xVal[i]);
+        else xChain2.push(xVal[i]);
+    }
+    xChain1.push(xMax);
+    xChain2.push(xMax);
+    
+    // D. Divide Y into two chains
+    const yChain1: number[] = [yMin];
+    const yChain2: number[] = [yMin];
+    for (let i = 1; i < numVerts - 1; i++) {
+        if (rng.next() < 0.5) yChain1.push(yVal[i]);
+        else yChain2.push(yVal[i]);
+    }
+    yChain1.push(yMax);
+    yChain2.push(yMax);
+
+    // E. Create Vector Components
+    const xVecs: number[] = [];
+    for(let i=0; i<xChain1.length-1; i++) xVecs.push(xChain1[i+1] - xChain1[i]);
+    for(let i=0; i<xChain2.length-1; i++) xVecs.push(xChain2[i] - xChain2[i+1]);
+    
+    const yVecs: number[] = [];
+    for(let i=0; i<yChain1.length-1; i++) yVecs.push(yChain1[i+1] - yChain1[i]);
+    for(let i=0; i<yChain2.length-1; i++) yVecs.push(yChain2[i] - yChain2[i+1]);
+
+    // F. Shuffle Y components to randomize shape
+    // Fisher-Yates shuffle
+    for (let i = yVecs.length - 1; i > 0; i--) {
+        const j = Math.floor(rng.next() * (i + 1));
+        [yVecs[i], yVecs[j]] = [yVecs[j], yVecs[i]];
+    }
+
+    // G. Combine and Sort Vectors by Angle
+    const vecs = xVecs.map((x, i) => ({ x, y: yVecs[i] }));
+    vecs.sort((a, b) => Math.atan2(a.y, a.x) - Math.atan2(b.y, b.x));
+    
+    // H. Lay out vertices
+    let currentX = 0, currentY = 0;
+    let rawVertices = [];
+    let minPolyX = 0, maxPolyX = 0, minPolyY = 0, maxPolyY = 0;
+    
+    for(const v of vecs) {
+        rawVertices.push({ x: currentX, y: currentY });
+        currentX += v.x;
+        currentY += v.y;
+        minPolyX = Math.min(minPolyX, currentX);
+        maxPolyX = Math.max(maxPolyX, currentX);
+        minPolyY = Math.min(minPolyY, currentY);
+        maxPolyY = Math.max(maxPolyY, currentY);
+    }
+
+    // I. Center the polygon at (0,0) relative
+    // Calculate centroid
+    let cx = 0, cy = 0;
+    for(const v of rawVertices) { cx += v.x; cy += v.y; }
+    cx /= rawVertices.length;
+    cy /= rawVertices.length;
+    
+    rawVertices = rawVertices.map(v => ({ x: v.x - cx, y: v.y - cy }));
+
+    // J. Scale to fit desired size (BaseRadius)
+    // Measure average radius of the generated unit polygon
+    let currentAvgR = 0;
+    for(const v of rawVertices) {
+        currentAvgR += Math.sqrt(v.x*v.x + v.y*v.y);
+    }
+    currentAvgR /= rawVertices.length;
+    
+    const scaleFactor = baseRadius / (currentAvgR || 1);
+
+    // --- 4. APPLY TO WORLD & CLIP ---
+    const finalVertices: {x:number, y:number}[] = [];
+
+    for(const v of rawVertices) {
+        // Apply scale and position relative to requested Center
+        const targetX = center.x + v.x * scaleFactor;
+        const targetY = center.y + v.y * scaleFactor;
         
-        // Add irregularity to radius
-        const noise = (rng.next() * 0.4 + 0.8); // 0.8 - 1.2 variation
-        const maxR = baseRadius * noise;
-        
-        // Calculate Ideal Vertex Position
-        const targetX = center.x + Math.cos(theta) * maxR;
-        const targetY = center.y + Math.sin(theta) * maxR;
-        
+        // Ray-Cast against ALL AvoidPolygons (Clipping)
+        // Find the closest intersection point. 
         const p0 = center;
         const p1 = { x: targetX, y: targetY };
-
-        // 4. Ray-Cast against ALL AvoidPolygons (Clipping)
-        // Find the closest intersection point. 
-        // If we hit an existing region at 50% distance, the vertex stops there.
         let minT = 1.0;
 
         for (const poly of avoidPolygons) {
@@ -140,15 +227,14 @@ export const generateIrregularPolygon = (
             }
         }
 
-        // Apply clip with a small buffer (0.02) to avoid exact edge overlapping
-        // Ensure we don't collapse to a single point (min 0.05)
+        // Apply clip with a small buffer to avoid exact edge overlapping
         const finalT = Math.max(0.05, minT - 0.02);
 
-        vertices.push({
+        finalVertices.push({
             x: center.x + (targetX - center.x) * finalT,
             y: center.y + (targetY - center.y) * finalT
         });
     }
 
-    return { vertices, center };
+    return { vertices: finalVertices, center };
 };

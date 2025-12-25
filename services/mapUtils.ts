@@ -406,7 +406,7 @@ export const createEnvironmentCharacter = (
         id,
         isPlayer: false,
         name: `${locationName}${nameSuffix}`,
-        appearance: "无定形的环境实体，或幻化为当地路人。", // Default public appearance
+        appearance: "这个地方的所有东西，所有的风雨，所有的土地，所有的居民……", // Default public appearance
         description: descTemplate.replace("{{LOCATION_NAME}}", locationName),
         avatarUrl: generateRandomFlagAvatar(), // Auto-generate flag avatar
         attributes: {
@@ -428,12 +428,12 @@ export const generateInitialMap = (config?: InitialWorldConfig): { map: MapState
     const seed = Math.random() * 10000;
     
     // Use provided config or fallback to defaults
-    const startRegionName = config?.startRegionName || "旧世边缘";
-    const startRegionDesc = config?.startRegionDesc || "远离繁华都市的边缘地带，被遗忘的旧世界残影。";
-    const startLocationName = config?.startLocationName || "起始营地";
+    const startRegionName = config?.startRegionName || "都市边缘";
+    const startRegionDesc = config?.startRegionDesc || "远离繁华都市的郊区，人烟稀少的安宁地带。";
+    const startLocationName = config?.startLocationName || "温馨小窝";
     const startLocationDesc = config?.startLocationDesc || "一切开始的地方。";
     const envCharSuffix = config?.environmentCharNameSuffix || "的环境";
-    const envCharDescTmpl = config?.environmentCharDescTemplate || "【系统代理】{{LOCATION_NAME}}的环境旁白角色，根据故事需求扮演自然环境、居民或路人、当地动植物、天气以及突发状况等，如果地点描述可知当地无居民，则不应该扮演当地居民。如果当地的环境本身可以和角色互动或者尝试获取角色的物品，旁白可以主动使用相关技能。"
+    const envCharDescTmpl = config?.environmentCharDescTemplate || "【系统代理】{{LOCATION_NAME}}的环境旁白角色，根据故事需求讲述自然环境、居民或路人、当地动植物、天气以及突发状况等，如果地点描述可知当地无居民，则不应该提及当地居民。如果当地的环境本身可以和角色互动或者尝试获取角色的物品，旁白可以主动使用相关技能。环境永远不会输出在场角色的台词。"
 
     const chunks: Record<string, MapChunk> = {};
     const locationsMap: Record<string, MapLocation> = {};
