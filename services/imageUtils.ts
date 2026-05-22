@@ -11,6 +11,31 @@ export const stripBase64Prefix = (dataUrl: string): string => {
     return dataUrl.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/, '');
 };
 
+export const base64ToBlob = (base64: string): Blob => {
+    const arr = base64.split(',');
+    const match = arr[0].match(/:(.*?);/);
+    const mime = match ? match[1] : 'image/png';
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+        u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+};
+
+export const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            if (typeof reader.result === 'string') resolve(reader.result);
+            else reject(new Error("Failed to convert blob to base64"));
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+};
+
 /**
  * Processes an image (File or Base64 string) according to settings.
  */
@@ -19,7 +44,7 @@ export const processImage = async (
     settings: ImageSettings
 ): Promise<string> => {
     return new Promise((resolve, reject) => {
-        const { maxShortEdge, maxLongEdge, compressionQuality } = settings;
+        const { maxShortEdge = 896, maxLongEdge = 4480, compressionQuality = 0.95 } = settings;
 
         const img = new Image();
         

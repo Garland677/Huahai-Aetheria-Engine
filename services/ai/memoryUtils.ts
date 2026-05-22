@@ -3,6 +3,99 @@ import { LogEntry, Character, MapLocation } from "../../types";
 import { ImageContextBuilder } from "./ImageContextBuilder";
 import { estimateTokenCount } from "./promptUtils";
 
+// --- EXPORTED HELPER: Check Presence ---
+// Centralized logic for checking if a character was present in a log entry
+export const isCharPresent = (entry: LogEntry, charId: string): boolean => {
+    // --- HIDDEN ROUND CHECK ---
+    // If it's a hidden round, only participants can see it
+    if (entry.snapshot && entry.snapshot.isHiddenRound) {
+         const participants = entry.snapshot.currentOrder || [];
+         const isSystem = charId === 'system'; 
+         const isEnv = charId.startsWith('env_'); 
+         const hasActed = entry.actingCharId === charId;
+         const isParticipant = participants.includes(charId) || hasActed;
+         
+         if (!isParticipant && !isSystem && !isEnv) return false;
+
+         // FIX: If participant, explicitly allow visibility regardless of presentCharIds
+         if (isParticipant) return true;
+    }
+    // ---------------------------
+
+    let isPresent = false;
+    
+    // Rule 1: Character was explicitly listed as present in the log (Recorded by system when log was created)
+    if (entry.presentCharIds && entry.presentCharIds.includes(charId)) isPresent = true;
+    
+    // Rule 2: Character was the one acting (Self-awareness)
+    if (!isPresent && entry.actingCharId === charId) isPresent = true;
+    
+    // Rule 3: Environment Character Logic (Omniscient for their location)
+    if (!isPresent && charId.startsWith('env_')) {
+         const suffix = charId.replace('env_', '');
+         if (entry.locationId === suffix) isPresent = true;
+    }
+    
+    return isPresent;
+};
+
+// --- EXPORTED HELPER: Extract Raw History ---
+// Used by import/export logic to get all relevant logs for a character without filtering/decay
+export const extractCharacterHistory = (
+    history: LogEntry[], 
+    charId: string
+): LogEntry[] => {
+    return history.filter(entry => isCharPresent(entry, charId));
+};
+
+// --- NEW HELPER: Get All Character Logs (Raw) ---
+// Used by Character Editor to view full, undecayed history
+export const getAllCharacterLogs = (
+    history: LogEntry[], 
+    charId: string,
+    legacyLogs?: LogEntry[]
+): LogEntry[] => {
+    let combinedHistory = history;
+    if (legacyLogs && legacyLogs.length > 0) {
+        combinedHistory = [...legacyLogs, ...history];
+    }
+    return combinedHistory.filter(entry => isCharPresent(entry, charId));
+};
+
+// --- SHARED FILTER LOGIC ---
+const isValidNarrativeContent = (text: string): boolean => {
+    // --- Universal Cleaning Phase 2: System Logs ---
+    if (text.match(/^(系统|\[系统\])[:：\s]/)) return false;
+    if (text.startsWith('系统')) return false; 
+    if (text.includes("--- 轮次结算")) return false;
+    if (text.includes("--- 第") && text.includes("轮 开始 ---")) return false; // Filter Round Markers for narrative context
+
+    // --- Universal Cleaning Phase 3: Specific Blacklist ---
+    if (text.includes("(后台)") || text.includes("正在寻找")) return false;
+    if (text.includes("欲望已满足")) return false;
+    if (text.includes("新欲望已产生")) return false;
+    if (text.includes("引擎全局设置")) return false;
+    if (text.includes("快速移动至")) return false;
+    if (text.includes("发现当地角色")) return false;
+    if (text.includes("视线切换至")) return false;
+    if (text.includes("视角已切换至")) return false;
+    if (text.includes("初始化完成")) return false;
+
+    // --- Attribute Awakening Filter ---
+    // Specifically hide attribute discovery logs from AI memory to prevent meta-gaming hallucinations
+    if (text.startsWith('> 属性觉醒') || text.startsWith('＞ 属性觉醒')) return false;
+
+    // === NEW FILTERS (ENHANCED) ===
+    if (text.startsWith('>') || text.startsWith('＞')) {
+        // Only keep important actions
+        const keepKeywords = ["获得", "交易", "抽取", "放入", "查看", "发现", "移动", "燃命", "判定失效", "生效", "被动"];
+        if (!keepKeywords.some(k => text.includes(k))) return false;
+    }
+
+    return true;
+};
+
+// Updated: Applies strict filtering to Global Memory / Short History
 export const getGlobalMemory = (
     history: LogEntry[], 
     currentRound: number, 
@@ -14,19 +107,33 @@ export const getGlobalMemory = (
     const budget = Math.max(1000, tokenLimit - 4000);
     
     const minRound = Math.max(1, currentRound - roundsToKeep);
-    // Get candidate entries (up to 50 last)
-    const candidates = history.filter(e => e.round >= minRound).slice(-50);
     
-    // Reverse to process from newest to oldest
+    // Get candidate entries (Filter by round first to reduce set)
+    const candidates = history.filter(e => e.round >= minRound);
+    
+    // Reverse to process from newest to oldest (prioritize recent content)
     const reversed = [...candidates].reverse();
     const finalSelection: string[] = [];
     let currentTokens = 0;
 
     for (const entry of reversed) {
-        // Global memory still keeps round info for context
-        let content = entry.content.replace(/<[^>]+>/g, '');
-        
-        // --- Image Injection for Global Memory ---
+        // 1. Clean HTML
+        let content = entry.content.replace(/<[^>]+>/g, '').trim();
+
+        // 2. Simplify Time/World Status Logs
+        const timeMatch = content.match(/当前故事时间：(.*?)，世界状态：(.*)/);
+        if (timeMatch) {
+            content = `${timeMatch[1]}，${timeMatch[2]}`;
+        }
+
+        // 3. Apply Strict Narrative Filter
+        if (!isValidNarrativeContent(content)) {
+            continue; 
+        }
+
+        if (!content) continue;
+
+        // 4. Image Injection
         if (imageBuilder && entry.images && entry.images.length > 0) {
             const imgTags = entry.images.map(img => {
                 const descPart = img.description ? `(你看到：${img.description}) ` : "";
@@ -35,74 +142,52 @@ export const getGlobalMemory = (
             content += imgTags;
         }
 
+        // 5. Construct Line (Optional: Keep Round prefix for context, or remove it?)
+        // Keeping [RX] is useful for turn order logic to gauge time flow, even if we removed the "Round Start" banner.
         const line = `[R${entry.round}] ${content}`; 
+        
         const tokens = estimateTokenCount(line);
         if (currentTokens + tokens > budget) {
-            // Trimmed here
             break; 
         }
+        
         finalSelection.push(line);
         currentTokens += tokens;
     }
     
-    // Restore order
+    // Restore chronological order
     return finalSelection.reverse().join('\n');
 };
 
 /**
  * Extracts character-specific memory with Logarithmic Decay Sampling.
- * 
- * Logic:
- * Let X be capacity (roundsToKeep).
- * Tier 0: Age < X. Step = 1 (Keep All).
- * Tier 1: X <= Age < 2X. Step = 2.
- * Tier n: 2^(n-1)X <= Age < 2^n*X. Step = 2^n.
- * 
- * Gaps between retained rounds are summarized with location/people presence.
  */
 export const getCharacterMemory = (
     history: LogEntry[], 
     charId: string, 
     currentLocationId?: string, 
-    capacity: number = 10, // Renamed from roundsToKeep, defaults to 10
+    capacity: number = 10, 
     imageBuilder?: ImageContextBuilder,
     tokenLimit: number = 64000,
     characterMap?: Record<string, Character>,
-    locationMap?: Record<string, MapLocation>
+    locationMap?: Record<string, MapLocation>,
+    legacyLogs?: LogEntry[] 
 ): string => {
-    if (!history || history.length === 0) return "";
+    // Combine history: Legacy (Negative/Zero Rounds) + Current
+    let combinedHistory = history;
+    if (legacyLogs && legacyLogs.length > 0) {
+        combinedHistory = [...legacyLogs, ...history];
+    }
 
-    // Heuristic: Reserve about 4000 tokens for other context
+    if (!combinedHistory || combinedHistory.length === 0) return "";
+
     const budget = Math.max(1000, tokenLimit - 4000);
 
     // 1. Group by Round and Filter Presence
     const roundMap = new Map<number, LogEntry[]>();
     
-    history.forEach(entry => {
-        // --- HIDDEN ROUND CHECK ---
-        if (entry.snapshot && entry.snapshot.isHiddenRound) {
-             const participants = entry.snapshot.currentOrder || [];
-             const isSystem = charId === 'system'; 
-             const isEnv = charId.startsWith('env_'); 
-             const hasActed = entry.actingCharId === charId;
-             const isParticipant = participants.includes(charId) || hasActed;
-             
-             if (!isParticipant && !isSystem && !isEnv) return;
-        }
-        // ---------------------------
-
-        let isPresent = false;
-        if (entry.presentCharIds && entry.presentCharIds.includes(charId)) isPresent = true;
-        if (!isPresent && currentLocationId && entry.locationId === currentLocationId) isPresent = true;
-        if (!isPresent && entry.actingCharId === charId) isPresent = true;
-        
-        // Environment character fallback
-        if (!isPresent && charId.startsWith('env_')) {
-             const suffix = charId.replace('env_', '');
-             if (entry.locationId === suffix) isPresent = true;
-        }
-
-        if (isPresent) {
+    combinedHistory.forEach(entry => {
+        if (isCharPresent(entry, charId)) {
             if (!roundMap.has(entry.round)) roundMap.set(entry.round, []);
             roundMap.get(entry.round)?.push(entry);
         }
@@ -112,7 +197,6 @@ export const getCharacterMemory = (
     const participatingRounds = Array.from(roundMap.keys()).sort((a, b) => b - a);
     if (participatingRounds.length === 0) return "";
 
-    const currentRound = participatingRounds[0]; // Assuming newest history is current
     const finalBlocks: string[] = [];
     let currentTokens = 0;
 
@@ -127,7 +211,6 @@ export const getCharacterMemory = (
     const flushGap = () => {
         if (gapBuffer.startRound === -1) return;
         
-        // Construct Summary
         const locNames = Array.from(gapBuffer.locs).map(lid => locationMap?.[lid]?.name || "未知地点").filter(n => n !== "未知地点");
         const charNames = Array.from(gapBuffer.chars).map(cid => characterMap?.[cid]?.name || "").filter(n => n);
         
@@ -136,26 +219,24 @@ export const getCharacterMemory = (
         
         const summary = `[R${gapBuffer.startRound}-R${gapBuffer.endRound}概略] ${locStr} ${charStr}`.trim();
         
-        // Check budget for summary line
         const tokens = estimateTokenCount(summary);
         if (currentTokens + tokens <= budget) {
             finalBlocks.push(summary);
             currentTokens += tokens;
         }
 
-        // Reset
         gapBuffer = { startRound: -1, endRound: -1, locs: new Set(), chars: new Set() };
     };
 
-    // 3. Iterate Rounds (Newest -> Oldest)
-    for (const r of participatingRounds) {
+    // 3. Iterate Rounds using INDEX as Age (Experiential Time)
+    for (let i = 0; i < participatingRounds.length; i++) {
         if (currentTokens >= budget) break;
 
-        const age = currentRound - r;
+        const r = participatingRounds[i];
+        const age = i; 
+        
         let step = 1;
-
         if (age >= capacity) {
-            // Tier calculation: floor(log2(age/capacity)) + 1
             const tier = Math.floor(Math.log2(age / capacity)) + 1;
             step = Math.pow(2, tier);
         }
@@ -165,67 +246,25 @@ export const getCharacterMemory = (
         if (shouldKeep) {
             flushGap();
 
-            // Process content for this round
             const entries = roundMap.get(r) || [];
             
             const roundLines = entries
                 .map(entry => {
-                    // --- Universal Cleaning Phase 1: HTML & Whitespace ---
-                    // Clean HTML tags first to ensure regex matches text correctly
+                    // 1. Clean HTML
                     let text = entry.content.replace(/<[^>]+>/g, '').trim();
 
-                    // --- Universal Cleaning Phase 2: System Logs ---
-                    // Aggressively filter out system logs for character memory
-                    // Matches "系统:", "系统：", "[系统]", or just "系统" at start
-                    if (text.match(/^(系统|\[系统\])[:：\s]/)) return null;
-                    if (text.startsWith('系统')) return null; // Catch-all for malformed
-                    if (text.includes("--- 轮次结算")) return null;
-                    
-                    // --- Universal Cleaning Phase 3: Specific Blacklist ---
-                    // These concepts are meta-game mechanics characters shouldn't explicitly recall as text
-                    if (text.includes("(后台)") || text.includes("正在寻找")) return null; // Population logs
-                    if (text.includes("欲望已满足")) return null; // Settlement details
-                    if (text.includes("新欲望已产生")) return null; // Env generation
-                    if (text.includes("引擎全局设置")) return null; // Settings
-                    if (text.includes("快速移动至")) return null; // Fast travel mechanics
-                    if (text.includes("发现当地角色")) return null; // Population logs
-
-                    // === NEW FILTERS (ENHANCED) ===
-                    // 1. Skill Activation with Target marker (Mechanical)
-                    if (text.includes("(目标: ")) return null;
-
-                    // 2. Mechanic Logs starting with > (Retain only acquisition/trade)
-                    // Matches "> " or "＞ "
-                    if (text.startsWith('>') || text.startsWith('＞')) {
-                        const keepKeywords = ["获得", "交易", "抽取", "放入","查看","发现", "移动", "燃命"];
-                        // If it doesn't contain any of the keep keywords, filter it out
-                        if (!keepKeywords.some(k => text.includes(k))) return null;
-                    }
-                    // ==============================
-
-                    // Simplify Time/World Status Logs
-                    // Pattern: "当前故事时间：2077年1月1日08时00分，世界状态：日间阴天" -> "2077年1月1日08时00分，日间阴天"
+                    // 2. Simplify Time
                     const timeMatch = text.match(/当前故事时间：(.*?)，世界状态：(.*)/);
                     if (timeMatch) {
                         text = `${timeMatch[1]}，${timeMatch[2]}`;
                     }
 
-                    // --- History Specific Filtering (Past Rounds) ---
-                    if (entry.round < currentRound) {
-                        // Filter Skill Activation prompts: "Name 发动了...技能..."
-                        if (text.match(/发动了.*技能/)) return null;
+                    // 3. Use Shared Filter Logic
+                    if (!isValidNarrativeContent(text)) return null;
 
-                        // Note: Previous logic filtered all '>' lines here. 
-                        // We removed that to allow the 'keepKeywords' logic above to persist trade logs from the past.
-
-                        // Filter No-check success (Redundant if caught by > rule, but harmless to keep)
-                        if (text.includes('(行为生效)')) return null;
-                    }
-
-                    // Remove empty lines after cleaning
                     if (!text.trim()) return null;
 
-                    // --- Image Injection ---
+                    // 4. Image Injection
                     if (imageBuilder && entry.images && entry.images.length > 0) {
                         const imgTags = entry.images.map(img => {
                             const descPart = img.description ? `(你看到：${img.description}) ` : "";
@@ -234,24 +273,22 @@ export const getCharacterMemory = (
                         text += imgTags;
                     }
                     
-                    // Note: We deliberately removed the [R${round}] prefix to save tokens and keep it narrative-focused
                     return text;
                 })
-                .filter((line): line is string => line !== null); // Type guard to remove nulls
+                .filter((line): line is string => line !== null);
             
             const roundText = roundLines.join('\n');
-            if (!roundText) continue; // Skip empty rounds
+            if (!roundText) continue;
 
             const tokens = estimateTokenCount(roundText);
             if (currentTokens + tokens > budget) {
-                break; // Stop if full
+                break;
             }
 
             finalBlocks.push(roundText);
             currentTokens += tokens;
 
         } else {
-            // Accumulate Gap Info
             const entries = roundMap.get(r) || [];
             entries.forEach(e => {
                 if (e.locationId) gapBuffer.locs.add(e.locationId);
@@ -261,13 +298,11 @@ export const getCharacterMemory = (
             });
 
             if (gapBuffer.endRound === -1) gapBuffer.endRound = r;
-            gapBuffer.startRound = r; // Updates as we go back in time
+            gapBuffer.startRound = r;
         }
     }
 
-    // Flush any remaining gap at the end (oldest memories)
     flushGap();
 
-    // 4. Return in Chronological Order (Oldest -> Newest)
     return finalBlocks.reverse().join('\n');
 };

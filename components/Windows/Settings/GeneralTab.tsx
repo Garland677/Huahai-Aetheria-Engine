@@ -3,7 +3,7 @@ import React from 'react';
 import { AppSettings, AIConfig, DefaultSettings, GlobalVariable, Provider } from '../../../types';
 import { ModelConfigCard } from './ModelConfigCard';
 import { Button, Input, Label } from '../../ui/Button';
-import { Globe, BrainCircuit, Bot, Clock, FastForward, MessageSquare, History, Scissors, User, Variable, Plus, Trash2, Palette, Image as ImageIcon, Smartphone, Activity, ArrowDownCircle, Eraser, Users } from 'lucide-react';
+import { Globe, BrainCircuit, Bot, Clock, FastForward, MessageSquare, History, Scissors, User, Variable, Plus, Trash2, Palette, Image as ImageIcon, Smartphone, Activity, ArrowDownCircle, Eraser, Users, Type } from 'lucide-react';
 
 interface GeneralTabProps {
     localSettings: AppSettings;
@@ -63,6 +63,16 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
         }));
     };
 
+    const handleClearComments = () => {
+        setLocalCharBehavior(prev => ({
+            ...prev,
+            readerComments: [],
+            pureComments: []
+        }));
+    };
+
+    const customEndpoints = localSettings.customEndpoints || [];
+
     return (
         <div className="space-y-6">
             
@@ -98,13 +108,82 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                             若开启，当有新日志生成时，视图将自动跳转到最新消息。若关闭，视口将保持在当前阅读位置不动。
                         </p>
                     </div>
+
+                    <div className="bg-surface p-3 rounded border border-border">
+                        <label className="flex items-center gap-2 text-sm text-body cursor-pointer">
+                            <input 
+                                type="checkbox" 
+                                checked={localSettings.showHiddenRoundContent ?? false}
+                                onChange={e => setLocalSettings({...localSettings, showHiddenRoundContent: e.target.checked})}
+                                className="accent-primary"
+                            /> 
+                            <span className="font-bold flex items-center gap-2"><Scissors size={14}/> 显示隐藏轮次内容 (Show Hidden Rounds)</span>
+                        </label>
+                        <p className="text-[10px] text-muted ml-6 mt-1">
+                            若开启，即使玩家角色不在场，也会显示隐藏轮次的详细内容。若关闭，内容将被遮蔽。
+                        </p>
+                    </div>
+
+                    <div className="bg-surface p-3 rounded border border-border">
+                        <label className="flex items-center gap-2 text-sm text-body cursor-pointer">
+                            <input 
+                                type="checkbox" 
+                                checked={localSettings.showAvatarsInLog ?? false}
+                                onChange={e => setLocalSettings({...localSettings, showAvatarsInLog: e.target.checked})}
+                                className="accent-primary"
+                            /> 
+                            <span className="font-bold flex items-center gap-2"><User size={14}/> 日志中显示头像 (Show Avatars in Log)</span>
+                        </label>
+                        <p className="text-[10px] text-muted ml-6 mt-1">
+                            若关闭，日志中出现的角色名将仅以高亮文字显示，且不附加边距间隔。
+                        </p>
+                    </div>
+
+                    {/* Font Settings */}
+                    <div className="bg-surface p-3 rounded border border-border">
+                         <div className="flex items-center gap-2 mb-3">
+                             <Type size={16} className="text-primary"/>
+                             <span className="font-bold text-sm text-body">字体设置 (Typography)</span>
+                         </div>
+                         
+                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                             <div>
+                                 <div className="flex justify-between items-center mb-1">
+                                     <Label>字体大小 (Font Size)</Label>
+                                     <span className="text-xs font-mono text-highlight">{localSettings.storyLogFontSize || 16}px</span>
+                                 </div>
+                                 <input 
+                                    type="range" 
+                                    min="12" max="32" step="1"
+                                    value={localSettings.storyLogFontSize ?? ""}
+                                    placeholder="16"
+                                    onChange={e => setLocalSettings({...localSettings, storyLogFontSize: e.target.value === '' ? undefined : parseInt(e.target.value)})}
+                                    className="w-full accent-primary"
+                                 />
+                             </div>
+                             <div>
+                                 <div className="flex justify-between items-center mb-1">
+                                     <Label>字体粗细 (Font Weight)</Label>
+                                     <span className="text-xs font-mono text-highlight">{localSettings.storyLogFontWeight || 400}</span>
+                                 </div>
+                                 <input 
+                                    type="range" 
+                                    min="100" max="900" step="100"
+                                    value={localSettings.storyLogFontWeight ?? ""}
+                                    placeholder="400"
+                                    onChange={e => setLocalSettings({...localSettings, storyLogFontWeight: e.target.value === '' ? undefined : parseInt(e.target.value)})}
+                                    className="w-full accent-primary"
+                                 />
+                             </div>
+                         </div>
+                    </div>
                 </div>
             </div>
 
             {/* Android Specific */}
             <div className="bg-surface-highlight/30 p-4 rounded border border-border">
                 <Label className="text-primary uppercase tracking-wider font-bold flex items-center gap-2 mb-4">
-                    <Smartphone size={16}/> 安卓特定设置 (Android Specific)
+                    <Smartphone size={16}/> 设备设置
                 </Label>
                 <div className="space-y-2">
                     <label className="flex items-center gap-2 text-sm text-body cursor-pointer">
@@ -117,7 +196,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                         <span className="font-bold">使用广义文件选择器 (Force Native Chooser)</span>
                     </label>
                     <p className="text-[10px] text-muted ml-6">
-                        在安卓设备上，勾选此项将解除对文件类型的限制，从而允许唤起非安卓原生文件选择工具。应用将在选择后手动校验文件类型。
+                        允许唤起非原生文件选择工具
                     </p>
                 </div>
             </div>
@@ -136,6 +215,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 configName="Judge AI"
                 providerDefaults={providerDefaults}
                 accentColorClass="text-primary"
+                customEndpoints={customEndpoints}
             />
 
             {/* CHAR BEHAVIOR AI CONFIG */}
@@ -151,8 +231,10 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 testingConnectionName={testingConnection}
                 configName="Behavior AI"
                 onSync={handleSyncAllClick}
+                onClearComments={handleClearComments} // Pass clear handler
                 providerDefaults={providerDefaults}
                 accentColorClass="text-primary"
+                customEndpoints={customEndpoints}
             />
 
             {/* CHAR GEN AI CONFIG */}
@@ -169,6 +251,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 configName="Generator AI"
                 providerDefaults={providerDefaults}
                 accentColorClass="text-primary"
+                customEndpoints={customEndpoints}
             />
 
             {/* Image Processing Settings */}
@@ -181,8 +264,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                         <Label>短边最大值 (px)</Label>
                         <Input 
                             type="number"
-                            value={localSettings.imageSettings?.maxShortEdge ?? 896}
-                            onChange={e => setLocalSettings({...localSettings, imageSettings: { ...localSettings.imageSettings, maxShortEdge: parseInt(e.target.value) || 0 }})}
+                            value={localSettings.imageSettings?.maxShortEdge ?? ""}
+                            placeholder="896"
+                            onChange={e => setLocalSettings({...localSettings, imageSettings: { ...localSettings.imageSettings, maxShortEdge: e.target.value === '' ? undefined : parseInt(e.target.value) }})}
                         />
                         <p className="text-[10px] text-muted mt-1">超过此宽度的图片将被等比缩小。</p>
                     </div>
@@ -190,8 +274,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                         <Label>缩放后长边上限 (px)</Label>
                         <Input 
                             type="number"
-                            value={localSettings.imageSettings?.maxLongEdge ?? 4480}
-                            onChange={e => setLocalSettings({...localSettings, imageSettings: { ...localSettings.imageSettings, maxLongEdge: parseInt(e.target.value) || 0 }})}
+                            value={localSettings.imageSettings?.maxLongEdge ?? ""}
+                            placeholder="4480"
+                            onChange={e => setLocalSettings({...localSettings, imageSettings: { ...localSettings.imageSettings, maxLongEdge: e.target.value === '' ? undefined : parseInt(e.target.value) }})}
                         />
                         <p className="text-[10px] text-muted mt-1">如果缩放后长边仍超过此值，将拒绝上传。</p>
                     </div>
@@ -199,13 +284,14 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                         <Label>压缩质量 (0.1 - 1.0)</Label>
                         <Input 
                             type="number"
-                            step="0.1"
+                            step="0.01"
                             max="1"
                             min="0.1"
-                            value={localSettings.imageSettings?.compressionQuality ?? 0.8}
-                            onChange={e => setLocalSettings({...localSettings, imageSettings: { ...localSettings.imageSettings, compressionQuality: parseFloat(e.target.value) || 0 }})}
+                            value={localSettings.imageSettings?.compressionQuality ?? ""}
+                            placeholder="0.95"
+                            onChange={e => setLocalSettings({...localSettings, imageSettings: { ...localSettings.imageSettings, compressionQuality: e.target.value === '' ? undefined : parseFloat(e.target.value) }})}
                         />
-                        <p className="text-[10px] text-muted mt-1">控制 JPEG 压缩率，越低体积越小。</p>
+                        <p className="text-[10px] text-muted mt-1">JPEG 压缩率</p>
                     </div>
                 </div>
             </div>
@@ -224,8 +310,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                                 step="0.1"
                                 min="0.1"
                                 className="w-full"
-                                value={localDefaults.gameplay.worldTimeScale || 1} 
-                                onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, worldTimeScale: parseFloat(e.target.value) || 0}})} 
+                                value={localDefaults.gameplay.worldTimeScale ?? ""} 
+                                placeholder="1"
+                                onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, worldTimeScale: e.target.value === '' ? undefined : parseFloat(e.target.value)}})} 
                             />
                         </div>
                         <p className="text-[10px] text-muted mt-1">
@@ -241,8 +328,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                                 step="1"
                                 min="1"
                                 className="w-full"
-                                value={localDefaults.gameplay.maxNPCsPerRound || 4}
-                                onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, maxNPCsPerRound: parseInt(e.target.value) || 4}})}
+                                value={localDefaults.gameplay.maxNPCsPerRound ?? ""}
+                                placeholder="4"
+                                onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, maxNPCsPerRound: e.target.value === '' ? undefined : parseInt(e.target.value)}})}
                             />
                         </div>
                         <p className="text-[10px] text-muted mt-1">
@@ -277,8 +365,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                             <Label>Max Output Tokens (单次生成最大长度)</Label>
                             <Input 
                                 type="number"
-                                value={localSettings.maxOutputTokens || 2000}
-                                onChange={e => setLocalSettings({...localSettings, maxOutputTokens: parseInt(e.target.value) || 0})}
+                                value={localSettings.maxOutputTokens ?? ""}
+                                placeholder="20000"
+                                onChange={e => setLocalSettings({...localSettings, maxOutputTokens: e.target.value === '' ? undefined : parseInt(e.target.value)})}
                                 className="font-mono text-xs"
                             />
                             <p className="text-[10px] text-muted mt-1">
@@ -289,8 +378,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                             <Label>Max Input Tokens (最大输入上下文)</Label>
                             <Input 
                                 type="number"
-                                value={localSettings.maxInputTokens || 64000}
-                                onChange={e => setLocalSettings({...localSettings, maxInputTokens: parseInt(e.target.value) || 0})}
+                                value={localSettings.maxInputTokens ?? ""}
+                                placeholder="64000"
+                                onChange={e => setLocalSettings({...localSettings, maxInputTokens: e.target.value === '' ? undefined : parseInt(e.target.value)})}
                                 className="font-mono text-xs"
                             />
                             <p className="text-[10px] text-muted mt-1">
@@ -304,24 +394,27 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                         <Label className="flex items-center gap-2"><History size={12}/> 全局历史轮数 (Long)</Label>
                         <Input 
                             type="number" 
-                            value={localSettings.maxHistoryRounds || 20} 
-                            onChange={e => setLocalSettings({...localSettings, maxHistoryRounds: parseInt(e.target.value) || 0})}
+                            value={localSettings.maxHistoryRounds ?? ""} 
+                            placeholder="20"
+                            onChange={e => setLocalSettings({...localSettings, maxHistoryRounds: e.target.value === '' ? undefined : parseInt(e.target.value)})}
                         />
                     </div>
                     <div>
                         <Label className="flex items-center gap-2"><Scissors size={12}/> 逻辑判定轮数 (Short)</Label>
                         <Input 
                             type="number" 
-                            value={localSettings.maxShortHistoryRounds || 5} 
-                            onChange={e => setLocalSettings({...localSettings, maxShortHistoryRounds: parseInt(e.target.value) || 0})}
+                            value={localSettings.maxShortHistoryRounds ?? ""} 
+                            placeholder="5"
+                            onChange={e => setLocalSettings({...localSettings, maxShortHistoryRounds: e.target.value === '' ? undefined : parseInt(e.target.value)})}
                         />
                     </div>
                     <div>
                         <Label className="flex items-center gap-2"><User size={12}/> 角色记忆能力 (Capacity)</Label>
                         <Input 
                             type="number" 
-                            value={localSettings.maxCharacterMemoryRounds || 10} 
-                            onChange={e => setLocalSettings({...localSettings, maxCharacterMemoryRounds: parseInt(e.target.value) || 0})}
+                            value={localSettings.maxCharacterMemoryRounds ?? ""} 
+                            placeholder="10"
+                            onChange={e => setLocalSettings({...localSettings, maxCharacterMemoryRounds: e.target.value === '' ? undefined : parseInt(e.target.value)})}
                         />
                         <p className="text-[9px] text-muted mt-0.5">决定长期记忆的采样密度。</p>
                     </div>
@@ -331,8 +424,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                         <Label className="flex items-center gap-2"><Globe size={12}/> 环境记忆能力 (Env Capacity)</Label>
                         <Input 
                             type="number" 
-                            value={localSettings.maxEnvMemoryRounds || 5} 
-                            onChange={e => setLocalSettings({...localSettings, maxEnvMemoryRounds: parseInt(e.target.value) || 0})}
+                            value={localSettings.maxEnvMemoryRounds ?? ""} 
+                            placeholder="5"
+                            onChange={e => setLocalSettings({...localSettings, maxEnvMemoryRounds: e.target.value === '' ? undefined : parseInt(e.target.value)})}
                         />
                         <p className="text-[9px] text-muted mt-0.5">专门用于“环境”角色的记忆轮数。通常较低以节省Token。</p>
                     </div>
@@ -346,8 +440,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                                 step="0.01"
                                 min="0"
                                 max="1"
-                                value={localSettings.actionMemoryDropoutProbability ?? 0.34} 
-                                onChange={e => setLocalSettings({...localSettings, actionMemoryDropoutProbability: Math.min(1, Math.max(0, parseFloat(e.target.value) || 0))})}
+                                value={localSettings.actionMemoryDropoutProbability ?? ""}
+                                placeholder="0.34"
+                                onChange={e => setLocalSettings({...localSettings, actionMemoryDropoutProbability: e.target.value === '' ? undefined : Math.min(1, Math.max(0, parseFloat(e.target.value)))})}
                             />
                             <p className="text-[9px] text-muted mt-0.5">仅在【行动回合】生效。触发时记忆能力临时降为 <b>4</b> 轮。</p>
                         </div>
@@ -358,8 +453,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                                 step="0.01"
                                 min="0"
                                 max="1"
-                                value={localSettings.reactionMemoryDropoutProbability ?? 0.34} 
-                                onChange={e => setLocalSettings({...localSettings, reactionMemoryDropoutProbability: Math.min(1, Math.max(0, parseFloat(e.target.value) || 0))})}
+                                value={localSettings.reactionMemoryDropoutProbability ?? ""}
+                                placeholder="0.34"
+                                onChange={e => setLocalSettings({...localSettings, reactionMemoryDropoutProbability: e.target.value === '' ? undefined : Math.min(1, Math.max(0, parseFloat(e.target.value)))})}
                             />
                             <p className="text-[9px] text-muted mt-0.5">仅在【反应回合】生效。触发时记忆能力临时降为 <b>2</b> 轮。</p>
                         </div>

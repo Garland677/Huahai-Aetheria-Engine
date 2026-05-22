@@ -19,7 +19,7 @@ const PROVIDER_DEFAULTS: Record<string, string> = {
     [Provider.GEMINI]: 'gemini-3-pro-preview',
     [Provider.OPENAI]: 'gpt-5-2025-08-07',
     [Provider.CLAUDE]: 'claude-sonnet-4-5-20250929',
-    [Provider.VOLCANO]: 'doubao-seed-1-6-251015',
+    [Provider.VOLCANO]: 'doubao-seed-1-8-251228',
     [Provider.OPENROUTER]: 'deepseek/deepseek-v3.2'
 };
 
@@ -210,7 +210,7 @@ export const SettingsWindow: React.FC<SettingsWindowProps> = ({ settings, judgeC
 
     return (
         <Window
-            title="引擎配置 (Engine Config)"
+            title="花海引擎设置"
             onClose={onClose}
             maxWidth="max-w-4xl"
             height="h-full max-h-[85vh]" 
@@ -289,10 +289,10 @@ export const SettingsWindow: React.FC<SettingsWindowProps> = ({ settings, judgeC
                 {/* Tabs */}
                 <div className="flex bg-surface-highlight border-b border-border p-1 gap-1 shrink-0 mb-4 rounded">
                     <button onClick={() => setActiveTab('general')} className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-2 ${activeTab === 'general' ? 'bg-primary text-primary-fg' : 'text-muted hover:bg-surface'}`}>
-                        <Settings size={14}/> 常规配置
+                        <Settings size={14}/> 常规设置
                     </button>
                     <button onClick={() => setActiveTab('developer')} className={`flex-1 py-2 text-xs font-bold rounded flex items-center justify-center gap-2 ${activeTab === 'developer' ? 'bg-primary text-primary-fg' : 'text-muted hover:bg-surface'}`}>
-                       {!isKeysUnlocked && <Lock size={12}/>} 开发者与默认值 (Developer)
+                       {!isKeysUnlocked && <Lock size={12}/>} 开发者设置
                     </button>
                 </div>
 

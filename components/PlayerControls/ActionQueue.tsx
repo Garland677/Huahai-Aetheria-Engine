@@ -14,7 +14,13 @@ export const ActionQueue: React.FC<ActionQueueProps> = ({ pendingActions, state,
     if (pendingActions.length === 0) return null;
 
     return (
-        <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-1 border-b border-border px-1">
+        <div 
+            className="flex items-center gap-2 overflow-x-auto pb-2 mb-1 border-b border-border px-1"
+            // Stop propagation to prevent SlidingLayout swipe logic on mobile
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+        >
             <span className="text-[10px] font-bold text-primary uppercase tracking-wider shrink-0">Queue:</span>
             {pendingActions.map((act, idx) => {
                 const targetName = act.targetId ? state.characters[act.targetId]?.name : "";

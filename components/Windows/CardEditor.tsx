@@ -5,6 +5,7 @@ import { Button, Input, Label, TextArea } from '../ui/Button';
 import { Plus, Trash2, Sparkles, Box, Zap, Coins, Hourglass, ShieldAlert, Wand2, EyeOff, Eye, MessageSquare, Lock, Edit2 } from 'lucide-react';
 import { ImageUploader } from '../ui/ImageUploader';
 import { Window } from '../ui/Window';
+import { generateCardId, generateEffectId } from '../../services/idUtils';
 
 interface CardEditorProps {
   onSave: (card: Card) => void;
@@ -16,12 +17,21 @@ interface CardEditorProps {
 }
 
 export const CardEditor: React.FC<CardEditorProps> = ({ onSave, onClose, initialCard, gameState, fixedCost, readOnly = false }) => {
+  
+  // Helper to collect existing IDs for uniqueness
+  const getUsedEffectIds = (c: Card): Set<string> => {
+      const ids = new Set<string>();
+      c.effects?.forEach(e => ids.add(e.id));
+      return ids;
+  };
+
   const ensureHitEffect = (c: Card): Card => {
       if (!c.effects || c.effects.length === 0) {
+          const usedIds = new Set<string>();
           return {
               ...c,
               effects: [{
-                  id: 'effect_hit_' + Date.now(),
+                  id: generateEffectId(usedIds), // Standardized ID
                   name: '命中判定',
                   targetType: 'specific_char',
                   targetAttribute: '健康', 
@@ -36,7 +46,7 @@ export const CardEditor: React.FC<CardEditorProps> = ({ onSave, onClose, initial
   };
 
   const [card, setCard] = useState<Card>(ensureHitEffect(initialCard || {
-    id: `card_${Date.now()}`,
+    id: generateCardId(gameState.cardPool), // Use Standardized ID
     name: '新卡牌',
     description: '',
     imageUrl: '',
@@ -48,8 +58,9 @@ export const CardEditor: React.FC<CardEditorProps> = ({ onSave, onClose, initial
   }));
 
   const addEffect = () => {
+    const usedIds = getUsedEffectIds(card);
     const newEffect: Effect = {
-      id: Date.now().toString(),
+      id: generateEffectId(usedIds), // Standardized ID
       name: '附加效果',
       targetType: 'specific_char',
       targetId: '',
@@ -75,6 +86,16 @@ export const CardEditor: React.FC<CardEditorProps> = ({ onSave, onClose, initial
         return;
     }
     setCard({ ...card, effects: (card.effects || []).filter((_, i) => i !== index) });
+  };
+
+  // Helper for safe number input
+  const handleNumericInput = (val: string, callback: (v: number | string) => void) => {
+      if (val === '' || val === '-' || val.endsWith('.') || (val.includes('.') && val.endsWith('0'))) {
+          callback(val);
+      } else {
+          const num = parseFloat(val);
+          callback(isNaN(num) ? val : num);
+      }
   };
 
   return (
@@ -167,7 +188,7 @@ export const CardEditor: React.FC<CardEditorProps> = ({ onSave, onClose, initial
                           value={card.cost} 
                           onChange={e => {
                               if (fixedCost === undefined && !readOnly) {
-                                  setCard({...card, cost: parseInt(e.target.value) || 0})
+                                  handleNumericInput(e.target.value, (val: any) => setCard({...card, cost: val}));
                               }
                           }} 
                           className={`flex-1 ${fixedCost !== undefined || readOnly ? 'text-muted cursor-not-allowed bg-surface-highlight' : ''}`}
@@ -214,8 +235,11 @@ export const CardEditor: React.FC<CardEditorProps> = ({ onSave, onClose, initial
                 const isHitEffect = idx === 0;
                 return (
                   <div key={effect.id} className={`bg-surface-light p-4 rounded border ${isHitEffect ? 'border-primary/50 bg-primary/5' : 'border-border'} text-sm relative group hover:border-highlight transition-colors`}>
+                    <div className="absolute -top-2 left-2 bg-surface border border-border px-2 text-[9px] text-muted font-mono rounded">
+                        ID: {effect.id}
+                    </div>
                     {isHitEffect && (
-                        <div className="absolute -top-2 -left-2 bg-primary text-primary-fg text-[10px] px-2 py-0.5 rounded shadow flex items-center gap-1 z-10">
+                        <div className="absolute -top-2 -left-2 bg-primary text-primary-fg text-[10px] px-2 py-0.5 rounded shadow flex items-center gap-1 z-10" style={{ left: '80px' }}>
                             <ShieldAlert size={10}/> 基础命中/触发判定
                         </div>
                     )}

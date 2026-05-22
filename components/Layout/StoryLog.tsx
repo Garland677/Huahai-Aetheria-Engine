@@ -3,13 +3,16 @@ import React, { useState, useRef, useEffect, useMemo, useLayoutEffect } from 're
 import { createPortal } from 'react-dom';
 import { GameState, Character, GamePhase, LogEntry, GameImage, WindowState } from '../../types';
 import { Button, TextArea, Input, Label } from '../ui/Button';
-import { Trash2, Scissors, Edit2, RefreshCw, ListOrdered, User, CheckCircle, AlertCircle, Sword, Play, Pause, Square, FastForward, X, Zap, MapPin, ArrowDown, MoreHorizontal, Book, BookOpen, ChevronDown, ChevronRight, ChevronUp } from 'lucide-react';
+import { Trash2, Scissors, Edit2, ListOrdered, User, CheckCircle, Check, AlertCircle, Pause, FastForward, X, ArrowDown, Book, BookOpen, ChevronDown, ChevronRight, ChevronUp, MapPin, Play, Zap, Square, MessageSquare } from 'lucide-react';
 import { ImageUploadModal } from '../Modals/ImageUploadModal';
-import { ModelQueueIndicator } from '../ui/ModelQueueIndicator'; // Import Indicator
+import { ModelQueueIndicator } from '../ui/ModelQueueIndicator';
 import { Window } from '../ui/Window';
+import { marked } from 'marked';
+import { StreamBus } from '../../services/streamService';
 
 interface StoryLogProps {
     state: GameState;
+
     updateState: (updater: (current: GameState) => GameState) => void;
     onConfirm: (title: string, msg: string, action: () => void) => void;
     onRollback: (index: number) => void; 
@@ -17,9 +20,10 @@ interface StoryLogProps {
     onStopExecution: () => void;
     onUnveil?: (logs: string[], charIds: string[], intent?: string) => void; 
     openWindow?: (type: WindowState['type'], data?: any) => void; // New Prop
+    onSkipPlayerTurn?: () => void; // Added for Next Button
 }
 
-// Character Selection Modal for Unveil
+// ... CharacterSelectorModal component (unchanged) ...
 const CharacterSelectorModal: React.FC<{
     state: GameState,
     onConfirm: (ids: string[], intent: string) => void,
@@ -84,7 +88,7 @@ const CharacterSelectorModal: React.FC<{
                 </div>
 
                 <div>
-                    <Label>额外指示 (可选)</Label>
+                    <Label>额外指示</Label>
                     <TextArea 
                         className="w-full h-24 text-xs bg-surface-light/50 border-border resize-none p-3 focus:border-primary mt-1"
                         placeholder="在此指定你想要揭露的具体细节或方向..."
@@ -97,87 +101,120 @@ const CharacterSelectorModal: React.FC<{
     );
 };
 
-const ProcessVisualizer = ({ state, onClearError }: { state: GameState, onClearError: () => void }) => {
-    const { phase, roundNumber, activeCharId, turnIndex, currentOrder, lastErrorMessage, isPaused } = state.round;
-    const activeChar = activeCharId ? state.characters[activeCharId] : null;
+const StreamAwareMarkdown = ({ logId, initialContent, isCompactLayout, parseFn }: { logId: string, initialContent: string, isCompactLayout: boolean, parseFn: (v: string, applyIndent: boolean) => string }) => {
+    const [content, setContent] = useState(initialContent);
 
-    const steps = [
-        { id: 'order', label: '判定顺序', icon: <ListOrdered size={14}/> },
-        { id: 'turn', label: '角色行动', icon: <User size={14}/> },
-        { id: 'settlement', label: '轮次结算', icon: <CheckCircle size={14}/> },
-    ];
+    useEffect(() => {
+        setContent(initialContent);
+    }, [initialContent]);
 
-    // Determine current visual step
-    let currentStepId = '';
-    if (phase === 'init' || phase === 'order') currentStepId = 'order';
-    else if (['turn_start', 'char_acting', 'executing'].includes(phase)) currentStepId = 'turn';
-    else if (['settlement', 'round_end'].includes(phase)) currentStepId = 'settlement';
+    useEffect(() => {
+        const handleStream = (e: any) => {
+             setContent(e.detail);
+        };
+        StreamBus.addEventListener(`stream-${logId}`, handleStream);
+        return () => StreamBus.removeEventListener(`stream-${logId}`, handleStream);
+    }, [logId]);
+
+    return (
+        <div 
+            className={`markdown-content w-full ${isCompactLayout ? '[&_p]:!m-0 [&_blockquote]:!m-0' : 'inline-block align-top'}`} 
+            style={{ 
+                fontSize: isCompactLayout ? 'calc(var(--story-font-size) * 0.70)' : 'var(--story-font-size)', 
+                fontWeight: 'var(--story-font-weight)',
+                lineHeight: 'inherit',
+                overflowWrap: 'anywhere'
+            }}
+            dangerouslySetInnerHTML={{__html: parseFn(content, !isCompactLayout)}}
+        ></div>
+    );
+};
+
+// --- Process Visualizer ---
+const ProcessVisualizer = ({ state, onClearError, openWindow, getTopVisibleLogId }: { state: GameState, onClearError: () => void, openWindow?: (type: WindowState['type'], data?: any) => void, getTopVisibleLogId?: () => string | undefined }) => {
+    const { phase, roundNumber, lastErrorMessage, isPaused } = state.round;
+    
+    // Count unsolved secrets in current location
+    const activeLocId = state.map.activeLocationId;
+    let unsolvedSecretsCount = 0;
+    Object.values(state.characters).forEach(c => {
+        if (state.map.charPositions[c.id]?.locationId === activeLocId) {
+            unsolvedSecretsCount += (c.secrets || []).filter(s => !s.solved).length;
+        }
+    });
+
+    // Dynamic Font Size for Round Number to prevent overflow
+    const roundStr = roundNumber.toString();
+    const getRoundFontSize = (len: number) => {
+        if (len >= 5) return 'text-[10px]';
+        if (len >= 4) return 'text-xs';
+        if (len >= 3) return 'text-sm';
+        return 'text-lg';
+    };
 
     return (
         <div className="bg-surface border-b border-border shadow-md z-30 flex flex-col shrink-0 relative">
             <div className="flex items-center justify-between px-3 py-2 h-14">
                 <div className="flex items-center gap-2 md:gap-4 overflow-x-auto scrollbar-hide max-w-full h-full">
-                    {/* ROUND BOX - Fixed Height h-10 */}
-                    <div className="flex flex-col items-center justify-center bg-black/20 px-3 rounded border border-border shrink-0 h-10 min-w-[3.5rem]">
-                        <span className="text-[8px] text-muted uppercase font-bold tracking-wider leading-none mb-0.5">Round</span>
-                        {/* Round Number -> Endorphin */}
-                        <span className="text-lg font-mono font-bold text-endorphin leading-none">{roundNumber}</span>
+                    {/* ROUND BOX */}
+                    <div className="flex flex-col items-center justify-center bg-black/20 px-2 rounded border border-border shrink-0 h-10 min-w-[3rem] overflow-hidden">
+                        <span className="text-[7px] text-muted uppercase font-bold tracking-wider leading-none mb-0.5">Round</span>
+                        <span className={`${getRoundFontSize(roundStr.length)} font-mono font-bold text-endorphin leading-none`}>
+                            {roundStr}
+                        </span>
                     </div>
                     
                     {isPaused && (
-                         /* PAUSED -> Endorphin */
-                         <div className="flex items-center gap-2 text-endorphin text-xs font-bold bg-endorphin/10 px-2 py-1 rounded animate-pulse shrink-0 border border-endorphin/30 h-8">
-                             <Pause size={12}/> <span className="hidden sm:inline">PAUSED</span>
+                         <div className="flex items-center justify-center text-endorphin bg-endorphin/10 rounded animate-pulse shrink-0 border border-endorphin/30 h-8 w-8" title="已暂停 (PAUSED)">
+                             <Pause size={16}/>
                          </div>
                     )}
 
                     <div className="h-6 w-px bg-border mx-1 shrink-0"></div>
 
-                    <div className="flex items-center gap-1">
-                        {steps.map((step, idx) => {
-                            const isActive = currentStepId === step.id;
-                            const isDone = steps.findIndex(s => s.id === currentStepId) > idx;
-                            
-                            return (
-                                <React.Fragment key={step.id}>
-                                    {/* Steps -> Dopamine */}
-                                    <div className={`
-                                        flex items-center gap-1 md:gap-2 px-2 md:px-3 py-1 md:py-1.5 rounded transition-all shrink-0
-                                        ${isActive 
-                                            ? (lastErrorMessage ? 'bg-red-900/50 text-red-200 border border-danger' : 'bg-dopamine/10 text-dopamine border border-dopamine shadow-lg scale-105') 
-                                            : isDone ? 'text-dopamine/50 opacity-70' : 'text-faint bg-surface'}
-                                    `}>
-                                        <div className={isActive && phase === 'executing' ? 'animate-spin' : ''}>{step.icon}</div>
-                                        <span className="text-xs font-bold hidden sm:inline">{step.label}</span>
-                                    </div>
-                                    {idx < steps.length - 1 && (
-                                        <div className={`h-0.5 w-2 md:w-4 ${isDone ? 'bg-dopamine/30' : 'bg-border'}`}></div>
-                                    )}
-                                </React.Fragment>
-                            );
-                        })}
+                    <div className="flex items-center gap-1 min-w-[100px]">
+                        {/* Placeholder for future buttons */}
                     </div>
                 </div>
 
-                {/* Active Char Info */}
-                {currentStepId === 'turn' && activeChar && (
-                     <div className="flex items-center gap-2 md:gap-3 animate-in slide-in-from-right-4 pl-2 border-l border-border ml-2 shrink-0 h-full">
-                         <div className="text-right hidden xs:flex flex-col justify-center h-full">
-                             <div className="text-[9px] text-muted uppercase leading-tight">Turn {turnIndex + 1}/{currentOrder.length}</div>
-                             <div className="text-sm font-bold text-body truncate max-w-[80px] leading-tight">{activeChar.name}</div>
-                         </div>
-                         {/* AVATAR BOX - Matched Height h-10 */}
-                         <div className="w-10 h-10 rounded bg-surface-highlight overflow-hidden border border-border shrink-0">
-                             {activeChar.avatarUrl ? (
-                                <img src={activeChar.avatarUrl} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} alt={activeChar.name}/>
-                             ) : (
-                                <div className="w-full h-full bg-surface-light flex items-center justify-center">
-                                    <User size={20} className="text-muted"/>
-                                </div>
-                             )}
-                         </div>
-                     </div>
-                )}
+                <div className="flex items-center gap-2 shrink-0">
+                    {/* Reading Mode Button */}
+                    <button
+                        onClick={() => {
+                            if (openWindow) {
+                                const topId = getTopVisibleLogId ? getTopVisibleLogId() : undefined;
+                                openWindow('reading_mode', { 
+                                    title: '故事全文', 
+                                    content: state.world.history, 
+                                    type: 'history',
+                                    initialLogId: topId
+                                });
+                            }
+                        }}
+                        className="flex items-center justify-center p-2 rounded bg-surface border border-border text-muted hover:text-primary hover:border-primary transition-all active:scale-95 h-10 w-10"
+                        title="阅读模式"
+                    >
+                        <BookOpen size={16}/>
+                    </button>
+
+                    {/* Puzzle Entry Point */}
+                    <button 
+                        onClick={() => openWindow && openWindow('puzzle')}
+                        className={`
+                            flex items-center gap-2 px-3 py-1.5 rounded border h-10 transition-all hover:brightness-110 active:scale-95
+                            ${unsolvedSecretsCount > 0 
+                                ? 'bg-primary border-primary text-primary-fg shadow-lg shadow-primary/20' 
+                                : 'bg-surface border-border text-muted hover:border-primary/50'
+                            }
+                        `}
+                        title="点击打开解谜窗口"
+                    >
+                        <div className="flex flex-col items-start leading-none">
+                            <span className="text-xs font-bold">解谜</span>
+                            {unsolvedSecretsCount > 0 && <span className="text-[9px] opacity-80">{unsolvedSecretsCount} 个线索</span>}
+                        </div>
+                    </button>
+                </div>
             </div>
 
             {/* Error Message Display */}
@@ -198,15 +235,15 @@ const ProcessVisualizer = ({ state, onClearError }: { state: GameState, onClearE
     );
 };
 
-// --- Location Bar Component ---
+// ... Location Bar Component (unchanged) ...
 const LocationBar = ({ state, openWindow }: { state: GameState, openWindow?: (type: WindowState['type'], data?: any) => void }) => {
+    // Re-paste LocationBar code for completeness if needed, or assume unchanged parts are kept.
     const locId = state.map.activeLocationId;
     const location = locId ? state.map.locations[locId] : null;
     const regionName = location && location.regionId && state.map.regions[location.regionId] 
         ? state.map.regions[location.regionId].name 
         : "未知区域";
     
-    // Check lock status
     const isLocked = state.appSettings.lockedFeatures?.locationEditor;
 
     const handlePinClick = (e: React.MouseEvent) => {
@@ -215,8 +252,6 @@ const LocationBar = ({ state, openWindow }: { state: GameState, openWindow?: (ty
         openWindow('location_edit', location);
     };
 
-    // --- ANIMATION OPTIMIZATION ---
-    // Use JS-driven 15fps loop instead of CSS animation to reduce performance overhead
     const bgRef = useRef<HTMLDivElement>(null);
     
     useEffect(() => {
@@ -224,7 +259,7 @@ const LocationBar = ({ state, openWindow }: { state: GameState, openWindow?: (ty
         let lastTime = 0;
         const FPS = 15;
         const INTERVAL = 1000 / FPS;
-        const DURATION = 30000; // 30s one way
+        const DURATION = 30000; 
 
         const animate = (time: number) => {
             frameId = requestAnimationFrame(animate);
@@ -232,14 +267,9 @@ const LocationBar = ({ state, openWindow }: { state: GameState, openWindow?: (ty
             lastTime = time;
 
             if (bgRef.current) {
-                // Ease-in-out cycle (0% -> 100% -> 0%)
-                // Cycle length = DURATION * 2
                 const t = time % (DURATION * 2);
-                // Map time to 0..1..0 with cosine easing
-                // phase: 0 to 2*PI
                 const phase = (t / (DURATION * 2)) * Math.PI * 2;
-                const progress = (1 - Math.cos(phase)) / 2; // result 0..1
-                
+                const progress = (1 - Math.cos(phase)) / 2; 
                 bgRef.current.style.backgroundPosition = `center ${progress * 100}%`;
             }
         };
@@ -250,35 +280,27 @@ const LocationBar = ({ state, openWindow }: { state: GameState, openWindow?: (ty
     
     return (
         <div className="relative h-12 w-full overflow-hidden border-b border-border bg-app shrink-0 group z-20">
-            {/* 1. Background Image */}
             <div 
                 ref={bgRef}
                 className="absolute inset-0 opacity-60 bg-no-repeat transition-opacity duration-500"
                 style={{ 
                     backgroundImage: location?.avatarUrl ? `url(${location.avatarUrl})` : 'none',
-                    backgroundSize: '100% auto', // Fit width, allow height to overflow
-                    willChange: 'background-position', // Hint browser to optimize
+                    backgroundSize: '100% auto',
+                    willChange: 'background-position',
                     filter: 'blur(0px)'
                 }}
             />
-            
-            {/* 2. Gradient Overlay (Left Transparent -> Right Black) */}
             <div className="absolute inset-0 bg-gradient-to-r from-transparent via-black/40 to-black/90 pointer-events-none" />
-
-            {/* 3. Info Text (Right Aligned) */}
             <div className="absolute right-4 top-1/2 -translate-y-1/2 text-right z-10 flex flex-col items-end justify-center h-full pointer-events-none">
                 <div 
                     className="text-sm md:text-base font-black text-black uppercase tracking-widest leading-none mb-0.5"
                     style={{ 
-                        // Location Name Stroke -> Oxytocin Color Hack
                         textShadow: '-1px -1px 0 #0d9488, 1px -1px 0 #0d9488, -1px 1px 0 #0d9488, 1px 1px 0 #0d9488' 
                     }}
                 >
                     {regionName} - {location ? location.name : "未知地点"}
                 </div>
             </div>
-            
-            {/* Optional Left Icon - Clickable if not locked */}
             <div 
                 className={`absolute left-4 top-1/2 -translate-y-1/2 text-white/50 z-20 p-2 rounded transition-colors ${!isLocked && location ? 'cursor-pointer hover:bg-white/10 hover:text-white' : ''}`}
                 onClick={handlePinClick}
@@ -290,110 +312,168 @@ const LocationBar = ({ state, openWindow }: { state: GameState, openWindow?: (ty
     );
 };
 
-export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfirm, onRollback, onRegenerate, onStopExecution, onUnveil, openWindow }) => {
+export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfirm, onRollback, onRegenerate, onStopExecution, onUnveil, openWindow, onSkipPlayerTurn }) => {
     const scrollRef = useRef<HTMLDivElement>(null);
     const scrollAnchorRef = useRef<{ id: string, offset: number } | null>(null);
-    const containerRef = useRef<HTMLDivElement>(null); // To detect resize
+    const previousScrollHeightRef = useRef<number>(0);
 
     const [editingLogIndex, setEditingLogIndex] = useState<number | null>(null);
     const [editLogValue, setEditLogValue] = useState("");
+    const [editLogHeight, setEditLogHeight] = useState<number | null>(null);
     const [focusedLogIndex, setFocusedLogIndex] = useState<number | null>(null);
     const [expandedSystemGroups, setExpandedSystemGroups] = useState<Set<string>>(new Set());
     
-    // Auto Round Input State
     const [showAutoInput, setShowAutoInput] = useState(false);
     const [autoRoundInput, setAutoRoundInput] = useState("5");
 
-    // Scroll Management State
     const [showScrollBottom, setShowScrollBottom] = useState(false);
+    const [isStickToBottom, setIsStickToBottom] = useState(true);
 
-    // Unveil Mode State
     const [isUnveilMode, setIsUnveilMode] = useState(false);
     const [selectedUnveilIndices, setSelectedUnveilIndices] = useState<Set<number>>(new Set());
     const [showCharSelector, setShowCharSelector] = useState(false);
-    // Delete Confirm State for Unveil Mode
     const [multiDeleteConfirm, setMultiDeleteConfirm] = useState(false);
 
-    // Image Editing State
     const [editingImageInfo, setEditingImageInfo] = useState<{ logIndex: number, image: GameImage } | null>(null);
 
+    // --- PAGINATION STATE ---
+    const visibleRoundCount = 10; // Fixed window for now, can be state if dynamic loading is re-implemented differently
+    
     const isLightMode = state.appSettings.storyLogLightMode;
-    const isAutoScrollEnabled = state.appSettings.autoScrollOnNewLog ?? false; // Default false based on user preference
+    const isAutoScrollEnabled = state.appSettings.autoScrollOnNewLog ?? false;
 
-    // --- SCROLL LOGIC ---
+    // --- LOAD DETECTION (Load/Reset) ---
+    // Detect when the game has been reset or a new save loaded by checking the first log ID.
+    // Ideally this would be a session ID, but checking the root history object change is sufficient if we catch it right.
+    const startLogId = state.world.history[0]?.id;
 
-    // 1. Handle user scrolling: Determine "Show Bottom" button and update Anchoring
+    useEffect(() => {
+        // When the first log ID changes (New Game or Load), force reset view to latest
+        setIsStickToBottom(true);
+        
+        // Wait for render cycle to complete before scrolling
+        setTimeout(() => {
+            if (scrollRef.current) {
+                scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            }
+        }, 50);
+    }, [startLogId]);
+
+    // --- HISTORY SLICING LOGIC ---
+    // Modified: Load more dynamically
+    const [historyLimit, setHistoryLimit] = useState(10);
+    
+    const visibleHistory = useMemo(() => {
+        const fullHistory = state.world.history;
+        if (fullHistory.length === 0) return [];
+
+        const currentRound = fullHistory[fullHistory.length - 1].round;
+        const minRound = Math.max(1, currentRound - historyLimit + 1);
+
+        return fullHistory.filter(log => log.round >= minRound);
+    }, [state.world.history, historyLimit]);
+
+    // --- HELPER: Get Top Visible Log ID ---
+    const getTopVisibleLogId = () => {
+        if (!scrollRef.current) return undefined;
+        const container = scrollRef.current;
+        const top = container.scrollTop;
+        
+        const children = Array.from(container.children) as HTMLElement[];
+        
+        for (const child of children) {
+            const elTop = child.offsetTop;
+            const elBottom = elTop + child.offsetHeight;
+            if (elBottom >= top) {
+                return child.id;
+            }
+        }
+        return undefined;
+    };
+
+    // --- SCROLL HANDLER (Pagination) ---
     const handleScroll = () => {
         if (scrollRef.current) {
             const container = scrollRef.current;
             const { scrollTop, scrollHeight, clientHeight } = container;
             
-            // Check if near bottom
-            const isStickToBottom = scrollHeight - scrollTop - clientHeight < 100;
-            setShowScrollBottom(!isStickToBottom);
+            // Check stick to bottom status
+            const distToBottom = scrollHeight - scrollTop - clientHeight;
+            const isStick = distToBottom < 100;
+            setShowScrollBottom(!isStick);
+            setIsStickToBottom(isStick);
 
-            // Update Anchor for resizing stability
-            const children = Array.from(container.children) as HTMLElement[];
-            for (const child of children) {
-                // Find first element whose bottom edge is below the current scroll top
-                // This means it's the first visible (or partially visible at top) element
-                if (child.offsetTop + child.offsetHeight > scrollTop) {
-                    // Save ID and relative offset
-                    scrollAnchorRef.current = {
-                        id: child.id,
-                        offset: scrollTop - child.offsetTop
-                    };
-                    break;
+            // Load More Logic: If close to top and not showing all
+            if (scrollTop < 50) {
+                const totalRounds = state.world.history[state.world.history.length - 1]?.round || 0;
+                if (historyLimit < totalRounds) {
+                    // Record previous height to maintain scroll position after render
+                    previousScrollHeightRef.current = scrollHeight;
+                    // Load 10 more rounds
+                    setHistoryLimit(prev => prev + 10);
                 }
             }
         }
     };
 
-    // 2. Scroll to Bottom Helper
     const scrollToBottom = () => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-        }
+        // Reset visible count to 10 when manually jumping to bottom to save performance
+        setHistoryLimit(10);
+        setIsStickToBottom(true);
+        
+        // Wait for render to apply trim, then scroll
+        setTimeout(() => {
+            if (scrollRef.current) {
+                scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+            }
+        }, 50);
     };
 
-    // 3. Auto-scroll on new content (Conditional)
-    useEffect(() => {
-        if (scrollRef.current && editingLogIndex === null) {
-            // Only auto-scroll if setting is enabled AND user was already at bottom (or near it)
-            // If setting is disabled, we do nothing, preserving current position.
-            if (isAutoScrollEnabled && !showScrollBottom) {
-                scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            }
-        }
-    }, [state.world.history, editingLogIndex, expandedSystemGroups, isAutoScrollEnabled]);
-
-    // 4. Scroll Restoration on Resize (Use ResizeObserver)
+    // --- AUTO TRIM & SCROLL ADJUSTMENT ---
+    const lastHistoryRef = useRef<typeof visibleHistory>([]);
+    
     useLayoutEffect(() => {
         if (!scrollRef.current) return;
         const container = scrollRef.current;
 
-        const observer = new ResizeObserver(() => {
-            // Logic: restore scroll position based on cached anchor
-            if (scrollAnchorRef.current) {
-                const anchorEl = document.getElementById(scrollAnchorRef.current.id);
-                if (anchorEl) {
-                    // Restore position: Element Top + Saved Offset
-                    // Note: We set scrollTop directly to avoid animation jitter during resize
-                    container.scrollTop = anchorEl.offsetTop + scrollAnchorRef.current.offset;
-                }
+        let historyChanged = false;
+        if (lastHistoryRef.current !== visibleHistory) {
+            historyChanged = true;
+            lastHistoryRef.current = visibleHistory;
+        }
+
+        // 1. Maintain Scroll Position after "Load More" (Prepending content)
+        if (previousScrollHeightRef.current > 0) {
+            const newScrollHeight = container.scrollHeight;
+            const diff = newScrollHeight - previousScrollHeightRef.current;
+            if (diff > 0) {
+                container.scrollTop += diff;
             }
-        });
+            previousScrollHeightRef.current = 0; // Reset
+        }
+        // 2. Auto-scroll to bottom if new content added AND sticky mode is on
+        else if (isAutoScrollEnabled && isStickToBottom && editingLogIndex === null) {
+            // Only snap to bottom if the history reference actually changed in this render.
+            // This prevents a sudden jump when the user merely scrolls past the isStickToBottom threshold.
+            if (historyChanged) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
 
-        observer.observe(container);
-        return () => observer.disconnect();
-    }, []);
+    }, [visibleHistory, isAutoScrollEnabled, isStickToBottom, editingLogIndex]);
 
-    // --- End Scroll Logic ---
 
+    // --- Log Actions ---
     const handleLogEdit = (index: number, newValue: string) => {
+        // Note: index passed here is relative to visibleHistory.
+        // We need to find the real index in global history.
+        // Use Log ID to find it safely.
+        const logId = visibleHistory[index].id;
+
         updateState(prev => {
-            const newHistory = [...prev.world.history];
-            newHistory[index] = { ...newHistory[index], content: newValue };
+            const newHistory = prev.world.history.map(l => 
+                l.id === logId ? { ...l, content: newValue } : l
+            );
             return { ...prev, world: { ...prev.world, history: newHistory } };
         });
         setEditingLogIndex(null);
@@ -401,12 +481,14 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
     };
 
     const handleLogDelete = (index: number) => {
-        // If deleting the last item, behave like a rollback to index-1
-        if (index === state.world.history.length - 1 && index > 0) {
-             onRollback(index - 1);
+        const logId = visibleHistory[index].id;
+        const globalIndex = state.world.history.findIndex(l => l.id === logId);
+
+        if (globalIndex === state.world.history.length - 1 && globalIndex > 0) {
+             onRollback(globalIndex - 1);
         } else {
              updateState(prev => {
-                const newHistory = prev.world.history.filter((_, i) => i !== index);
+                const newHistory = prev.world.history.filter(l => l.id !== logId);
                 return { ...prev, world: { ...prev.world, history: newHistory } };
             });
         }
@@ -415,11 +497,60 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
     };
 
     const handleRegenerateAt = (index: number) => {
-        onConfirm("重新生成 / 分叉", "确定要从此处分叉/重新生成吗？\n\n**此条消息**及之后的所有内容将被删除，系统将重新从本回合开始演算。", () => {
-            // Use specialized Regenerate function that enforces correct state
-            onRegenerate(index);
+        const logId = visibleHistory[index].id;
+        const globalIndex = state.world.history.findIndex(l => l.id === logId);
+        const targetLog = state.world.history[globalIndex];
+
+        // LOGIC UPDATE: Check Log Type
+        const isSystemOrderLog = targetLog.content.includes("系统: 本轮行动顺序") || 
+                                 targetLog.content.includes("系统: 手动设定轮次顺序") ||
+                                 targetLog.content.includes("系统: 发现当地角色") ||
+                                 targetLog.content.includes("系统: 发现新地点");
+        
+        // Also check if it's a "Round Start" log
+        const isRoundStart = targetLog.content.match(/^--- 第 (\d+) 轮 开始 ---/);
+
+        // If it is a System/Order/RoundStart log, we skip the review window and just execute
+        if (isSystemOrderLog || isRoundStart || targetLog.type === 'system') {
+            onRegenerate(globalIndex);
             setFocusedLogIndex(null);
-        });
+        } else {
+            // Case 2: Character Action/Reaction -> Open Review Window
+            if (openWindow) {
+                openWindow('review', { 
+                    logIndex: globalIndex, 
+                    onRegenerate: (idx: number) => {
+                        onRegenerate(idx);
+                        setFocusedLogIndex(null);
+                    },
+                    mode: 'branch' // Explicitly set mode to branch
+                });
+            } else {
+                // Fallback if window manager not available
+                onConfirm("重新生成 / 分叉", "确定要从此处分叉/重新生成吗？\n\n**此条消息**及之后的所有内容将被删除，系统将重新从本回合开始演算。", () => {
+                    onRegenerate(globalIndex);
+                    setFocusedLogIndex(null);
+                });
+            }
+        }
+    };
+
+    // New: Handle Pure Comment (Annotation)
+    const handleCommentAt = (index: number) => {
+        const logId = visibleHistory[index].id;
+        const globalIndex = state.world.history.findIndex(l => l.id === logId);
+
+        if (openWindow) {
+            openWindow('review', {
+                logIndex: globalIndex,
+                onRegenerate: (idx: number) => {
+                    // This callback shouldn't really be called in comment mode, but pass it for type safety
+                    onRegenerate(idx);
+                },
+                mode: 'comment' // Set mode to comment
+            });
+            setFocusedLogIndex(null);
+        }
     };
 
     const togglePause = () => {
@@ -427,11 +558,10 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
     };
 
     const handleStopRound = () => {
-        onStopExecution(); // Use new Engine Stop
+        onStopExecution();
     };
 
     const handleAutoRoundClick = () => {
-        // If already running auto, stop it
         if ((state.round.autoAdvanceCount || 0) > 0) {
             updateState(s => ({ ...s, round: { ...s.round, autoAdvanceCount: 0 } }));
         } else {
@@ -447,7 +577,7 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                 round: { 
                     ...s.round, 
                     autoAdvanceCount: count,
-                    isPaused: false // Also auto-start
+                    isPaused: false
                 } 
             }));
         }
@@ -462,11 +592,9 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
     };
 
     const handleLogClick = (index: number, e: React.MouseEvent) => {
-        // Prevent triggering if clicking inside edit area or buttons
         if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('textarea')) {
             return;
         }
-        
         if (isUnveilMode) {
             const next = new Set(selectedUnveilIndices);
             if (next.has(index)) next.delete(index);
@@ -474,7 +602,6 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
             setSelectedUnveilIndices(next);
             return;
         }
-
         if (focusedLogIndex === index) {
             setFocusedLogIndex(null);
         } else {
@@ -482,24 +609,24 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
         }
     };
 
-    // --- Image Handling ---
     const handleImageUpdate = (newImage: GameImage) => {
         if (!editingImageInfo) return;
         const { logIndex } = editingImageInfo;
-        
+        const logId = visibleHistory[logIndex].id;
+
         updateState(prev => {
-            const newHistory = [...prev.world.history];
-            const logEntry = { ...newHistory[logIndex] };
-            if (logEntry.images) {
-                logEntry.images = logEntry.images.map(img => img.id === newImage.id ? newImage : img);
-                newHistory[logIndex] = logEntry;
-            }
+            const newHistory = prev.world.history.map(l => {
+                if (l.id === logId) {
+                    const updatedImages = l.images ? l.images.map(img => img.id === newImage.id ? newImage : img) : [];
+                    return { ...l, images: updatedImages };
+                }
+                return l;
+            });
             return { ...prev, world: { ...prev.world, history: newHistory } };
         });
         setEditingImageInfo(null);
     };
 
-    // --- Unveil Logic ---
     const enterUnveilMode = (index: number) => {
         setIsUnveilMode(true);
         setSelectedUnveilIndices(new Set([index]));
@@ -510,154 +637,136 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
         setShowCharSelector(false);
         setIsUnveilMode(false);
         
+        // Map local indices to content strings
         const logs = (Array.from(selectedUnveilIndices) as number[])
             .sort((a: number, b: number) => a - b)
-            .map((i: number) => state.world.history[i]?.content)
+            .map((i: number) => visibleHistory[i]?.content)
             .filter((s): s is string => !!s);
-        
+            
         if (onUnveil) onUnveil(logs, charIds, intent);
         setSelectedUnveilIndices(new Set());
     };
     
-    // --- Multi Delete Logic ---
     const handleMultiDelete = () => {
         if (!multiDeleteConfirm) {
             setMultiDeleteConfirm(true);
-            setTimeout(() => setMultiDeleteConfirm(false), 2000); // 2s reset
+            setTimeout(() => setMultiDeleteConfirm(false), 2000);
             return;
         }
+        
+        const idsToDelete = new Set<string>();
+        selectedUnveilIndices.forEach(idx => {
+            if (visibleHistory[idx]) idsToDelete.add(visibleHistory[idx].id);
+        });
 
-        // Execute Delete
         updateState(prev => ({
             ...prev,
             world: {
                 ...prev.world,
-                // Filter logs where index is NOT in selected set
-                history: prev.world.history.filter((_, i) => !selectedUnveilIndices.has(i))
+                history: prev.world.history.filter(l => !idsToDelete.has(l.id))
             }
         }));
-        
-        // Reset UI
         setIsUnveilMode(false);
         setSelectedUnveilIndices(new Set());
         setMultiDeleteConfirm(false);
     };
 
-    // --- Smart Text Enrichment ---
-    const enrichLogText = (text: string) => {
+    const enrichAndParseText = (text: string, applyIndent: boolean = false) => {
         let enriched = text;
-        
-        // Fix: Remove specific text-muted class to avoid dimming narrative logs
         enriched = enriched.replace("text-slate-400 italic", "italic");
+        enriched = enriched.replace(/([^\n])\n(- |\* |\d+\. )/g, '$1\n\n$2');
+        
+        // Escape tilde to prevent markdown strikethrough interpretation
+        enriched = enriched.replace(/~/g, '&#126;');
 
-        // 1. Replace Character Names with Avatar + Name
-        // Filter characters that are present in the text AND have an avatar
+        // Characters matching
+        const showAvatarsInLog = state.appSettings.showAvatarsInLog;
         const matchingChars = (Object.values(state.characters) as Character[])
-            .filter(char => char.avatarUrl && enriched.includes(char.name));
-
-        // Sort by name length descending to handle overlapping names (e.g. "小明" vs "小明的家")
-        // Longer names processed first to consume the string token
+            .filter(char => enriched.includes(char.name) && (showAvatarsInLog ? char.avatarUrl !== undefined : true));
         matchingChars.sort((a, b) => b.name.length - a.name.length);
 
         if (matchingChars.length > 0) {
-            // Escape special regex characters in names
             const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            
-            // Construct a single regex OR pattern: (NameLong|NameShort|NameX)
-            const pattern = new RegExp(`(${matchingChars.map(c => escapeRegExp(c.name)).join('|')})`, 'g');
-            
-            enriched = enriched.replace(pattern, (match) => {
-                const char = matchingChars.find(c => c.name === match);
+            // Change regex to capture the optional @ so we can preserve it
+            const pattern = new RegExp(`(@?)(${matchingChars.map(c => escapeRegExp(c.name)).join('|')})`, 'g');
+            enriched = enriched.replace(pattern, (match, atSymbol, charName) => {
+                const char = matchingChars.find(c => c.name === charName);
                 if (char) {
-                    // Added bg-black/50 for better visibility on transparent images
-                    return `<span class="inline-flex items-center align-bottom mx-1 text-dopamine"><img src="${char.avatarUrl}" class="w-4 h-4 rounded-sm object-cover mr-1 opacity-80 bg-black/50"/>${char.name}</span>`;
+                    if (showAvatarsInLog && char.avatarUrl) {
+                        return `<span class="inline-flex items-center align-bottom" style="color: var(--dopamine-log)">${atSymbol}<img src="${char.avatarUrl}" class="w-4 h-4 rounded-sm object-cover mx-0.5 opacity-80 bg-black/50"/>${char.name}</span>`;
+                    } else {
+                        // Return with @ preserved
+                        return `<span style="color: var(--dopamine-log)">${atSymbol}${char.name}</span>`;
+                    }
                 }
-                return match;
+                return match; // fallback
             });
         }
 
-        // 2. Replace [CardName] or 【CardName】 with Icon + Name
         const allCards = [...state.cardPool];
         (Object.values(state.characters) as Character[]).forEach(c => allCards.push(...c.skills));
-        
         const uniqueCards = Array.from(new Set(allCards.map(c => c.name))).map(name => {
             return allCards.find(c => c.name === name);
         });
-
         uniqueCards.forEach(card => {
             if (!card || !card.imageUrl) return;
-            
-            // Added bg-black/50 for better visibility
-            // Standard bracket
             if (enriched.includes(`[${card.name}]`)) {
                 const imgTag = `[<span class="inline-flex items-center align-bottom mx-0.5"><img src="${card.imageUrl}" class="w-4 h-4 rounded-sm object-cover mr-1 opacity-80 bg-black/50"/>${card.name}</span>]`;
                 enriched = enriched.split(`[${card.name}]`).join(imgTag);
             }
-            // Chinese bracket
             if (enriched.includes(`「${card.name}」`)) {
                 const imgTag = `「<span class="inline-flex items-center align-bottom mx-0.5"><img src="${card.imageUrl}" class="w-4 h-4 rounded-sm object-cover mr-1 opacity-80 bg-black/50"/>${card.name}</span>」`;
                 enriched = enriched.split(`「${card.name}」`).join(imgTag);
             }
         });
 
-        // 3. Process Bolding **text**
-        const boldClass = isLightMode ? "text-indigo-900 italic font-bold" : "text-indigo-300 italic";
-        enriched = enriched.replace(/\*\*(.*?)\*\*/g, `<span class="${boldClass}">$1</span>`);
-
-        return enriched;
+        try {
+             let html = marked.parse(enriched, { breaks: true, gfm: true }) as string;
+             if (applyIndent && html) {
+                 html = html.replace(/<p>/g, '<p>&nbsp;&nbsp;&nbsp;&nbsp;');
+                 html = html.replace(/<br\s*\/?>/g, '<br/>&nbsp;&nbsp;&nbsp;&nbsp;');
+                 // Add for blockquotes if they also start a line
+                 html = html.replace(/<blockquote>/g, '<blockquote>&nbsp;&nbsp;&nbsp;&nbsp;');
+             }
+             if (!html) return enriched;
+             return html;
+        } catch (e) {
+             return enriched;
+        }
     };
 
-    // --- Helper: Check if an entry is a System log ---
     const isSystemEntry = (entry: LogEntry) => {
         const line = entry.content;
-        return entry.type === 'system' || !!line.match(/^\[.*?\]\s*系统[:\s]/) || line.includes('---');
+        // Fix: Use strict check or start match. 
+        // includes('---') was too aggressive and matched markdown tables.
+        return entry.type === 'system' || 
+               !!line.match(/^\[.*?\]\s*系统[:\s]/) || 
+               line.trim().startsWith('---');
     };
 
-    // --- Grouping Logic for System Messages ---
-    interface GroupedLogs {
-        type: 'single' | 'group';
-        id: string; // ID of the first item in the group or the item itself
-        items: Array<{ entry: LogEntry, index: number }>;
-    }
-
+    // --- Grouping Logic applied to Visible History ---
+    interface GroupedLogs { type: 'single' | 'group'; id: string; items: Array<{ entry: LogEntry, index: number }>; }
     const groupedHistory = useMemo(() => {
         const result: GroupedLogs[] = [];
         let currentGroup: Array<{ entry: LogEntry, index: number }> = [];
 
-        state.world.history.forEach((entry, i) => {
+        visibleHistory.forEach((entry, i) => {
             const isSystem = isSystemEntry(entry);
-            
             if (isSystem) {
                 currentGroup.push({ entry, index: i });
             } else {
-                // If there's a pending group, push it
                 if (currentGroup.length > 0) {
-                    result.push({ 
-                        type: 'group', 
-                        id: currentGroup[0].entry.id, 
-                        items: currentGroup 
-                    });
+                    result.push({ type: 'group', id: `${currentGroup[0].entry.id}-${currentGroup[0].index}`, items: currentGroup });
                     currentGroup = [];
                 }
-                // Push current non-system entry
-                result.push({ 
-                    type: 'single', 
-                    id: entry.id, 
-                    items: [{ entry, index: i }] 
-                });
+                result.push({ type: 'single', id: `${entry.id}-${i}`, items: [{ entry, index: i }] });
             }
         });
-
-        // Push any remaining group
         if (currentGroup.length > 0) {
-            result.push({ 
-                type: 'group', 
-                id: currentGroup[0].entry.id, 
-                items: currentGroup 
-            });
+            result.push({ type: 'group', id: `${currentGroup[0].entry.id}-${currentGroup[0].index}`, items: currentGroup });
         }
         return result;
-    }, [state.world.history]);
+    }, [visibleHistory]);
 
     const toggleGroup = (groupId: string) => {
         const next = new Set(expandedSystemGroups);
@@ -666,79 +775,109 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
         setExpandedSystemGroups(next);
     };
 
-    const renderLogItem = (entry: LogEntry, i: number, isGrouped: boolean = false) => {
+    const renderLogItem = (entry: LogEntry, i: number, isGrouped: boolean = false, extraClass: string = '', expandButton?: React.ReactNode) => {
         const line = entry.content;
         const isSystemLog = isSystemEntry(entry);
-        
-        // Fixed: Only extract tags that appear at the very START of the string to avoid catching skills in brackets
+        const isQuoteLog = line.trim().startsWith('>');
+        const isCompactLayout = isSystemLog || isQuoteLog;
         const systemTagMatch = line.match(/^\[(.*?)\]/);
         const systemTag = systemTagMatch ? systemTagMatch[0] : "";
-        const displayContent = systemTag ? line.substring(systemTag.length) : line;
+        let displayContent = (systemTag ? line.substring(systemTag.length) : line).trim();
 
-        // Text Color Class based on Mode - Update to use new CSS Vars or specific classes
-        const textClass = isSystemLog 
-            ? 'text-muted text-xs italic border-l-2 border-border pl-2 py-1'
-            : ''; // Inherit from parent (var(--text-story))
+        // --- HIDDEN ROUND MASKING ---
+        if (entry.snapshot?.isHiddenRound) {
+             const isPlayerInvolved = (entry.snapshot.currentOrder || []).some(id => {
+                 const char = state.characters[id];
+                 return char && char.isPlayer;
+             });
+             
+             const showContent = state.appSettings.showHiddenRoundContent;
+             
+             if (!isPlayerInvolved && !showContent) {
+                 // Replace all non-whitespace characters with block char
+                 displayContent = displayContent.replace(/[^\s\n]/g, '█');
+                 // Add a small hint if content exists
+                 if (displayContent.length > 0) {
+                     displayContent += " (被隐藏)";
+                 }
+             }
+        }
 
+        const textClass = isSystemLog ? 'text-muted italic py-0' : ''; 
         const isFocused = focusedLogIndex === i;
         const isSelectedForUnveil = selectedUnveilIndices.has(i);
 
-        // --- CHECK IF THIS IS A MILESTONE LOG FOR REGENERATION ---
-        const isOrderLog = line.includes("系统: 本轮行动顺序") || line.includes("系统: 手动设定轮次顺序");
-        const isSettlementLog = line.includes("--- 轮次结算阶段 ---");
+        const isOrderLog = line.includes("系统: 本轮行动顺序") || 
+                           line.includes("系统: 手动设定轮次顺序") ||
+                           (line.includes("--- 第") && line.includes("轮 开始 ---"));
+
+        // Check if this log is the start of a character's action output (including Environment)
+        let isActionStart = !isSystemLog;
         
-        let isCharStartLog = !isSystemLog;
-
-        // New: Environment characters do not create branch points
-        if (entry.actingCharId && entry.actingCharId.startsWith('env_')) {
-            isCharStartLog = false;
-        }
-
-        if (isCharStartLog) {
-            // Logic to determine if this is the start of a character's turn log block
-            // ... (omitted complex check for simplicity, relying on standard interactions)
-            // Re-implementing simplified check from original
+        if (isActionStart) {
             for (let k = i - 1; k >= 0; k--) {
-                const pLog = state.world.history[k];
-                if (pLog.turnIndex === entry.turnIndex && pLog.type !== 'system') {
-                    isCharStartLog = false;
+                const pLog = visibleHistory[k];
+                if (!pLog) break;
+                
+                // If previous log has different round or turn, then this IS the start (relative to this turn)
+                if (pLog.round !== entry.round || pLog.turnIndex !== entry.turnIndex) {
                     break;
                 }
-                if (pLog.turnIndex !== entry.turnIndex) break;
-                if (pLog.content.includes("系统: 本轮行动顺序") || pLog.content.includes("系统: 手动设定轮次顺序")) break;
+
+                // If previous log is same turn AND not system, then current is NOT start (it's a continuation)
+                if (pLog.type !== 'system') {
+                    isActionStart = false;
+                    break;
+                }
             }
         }
 
-        const isBranchablePoint = isOrderLog || isSettlementLog || isCharStartLog;
-        
-        // Assign Stable ID for Anchor Scrolling
-        // We use entry.id which is unique
+        const isBranchablePoint = isOrderLog || isActionStart;
         const domId = entry.id || `log-item-${i}`;
 
         return (
             <div 
                 id={domId}
-                key={entry.id || i} 
+                key={`${entry.id || i}-${i}`} 
                 className={`
-                    relative animate-in fade-in slide-in-from-bottom-1 duration-300 transition-colors rounded ${textClass} 
-                    ${isFocused ? 'bg-primary/10 -mx-2 px-4 py-2 ring-1 ring-primary/20' : 'pr-2'}
-                    ${isSelectedForUnveil ? 'bg-primary/10 -mx-2 px-4 py-2 ring-1 ring-primary/40' : ''}
+                    relative animate-in fade-in slide-in-from-bottom-1 duration-300 transition-colors rounded ${textClass} pr-2
+                    ${isFocused ? 'bg-primary/10 ring-1 ring-primary/20' : ''}
+                    ${isSelectedForUnveil ? 'bg-primary/10 ring-1 ring-primary/40' : ''}
                     ${isUnveilMode ? 'cursor-pointer hover:bg-white/5' : ''}
-                    ${isGrouped ? 'mb-1' : ''}
+                    ${extraClass}
                 `}
                 onClick={(e) => handleLogClick(i, e)}
             >
                 {editingLogIndex === i ? (
-                    <div className="flex flex-col gap-2 bg-surface/50 p-2 rounded border border-primary/50">
+                    <div className="relative">
                         <TextArea 
                             autoFocus
                             value={editLogValue}
                             onChange={e => setEditLogValue(e.target.value)}
-                            className="w-full min-h-[100px]"
+                            className="w-full resize-y bg-surface-light border border-primary/50 rounded focus:border-primary focus:ring-1 focus:ring-primary p-2"
+                            style={{ 
+                                minHeight: editLogHeight ? `${Math.max(editLogHeight, 40)}px` : '100px',
+                                fontSize: isCompactLayout ? 'calc(var(--story-font-size) * 0.70)' : 'var(--story-font-size)',
+                                fontWeight: 'var(--story-font-weight)',
+                                lineHeight: 'inherit'
+                            }}
                         />
-                        <div className="flex justify-end gap-2">
-                            <Button size="sm" variant="secondary" onClick={() => setEditingLogIndex(null)}>取消</Button>
-                            <Button size="sm" onClick={() => handleLogEdit(i, editLogValue)}>保存</Button>
+                        <div className="absolute right-0 -top-8 z-20 flex gap-1 bg-surface-highlight border border-border shadow-xl px-2 py-1 rounded-t-lg rounded-bl-lg items-center animate-in slide-in-from-bottom-2 fade-in">
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); setEditingLogIndex(null); }}
+                                className="text-muted hover:text-dopamine p-1 rounded hover:bg-surface transition-colors"
+                                title="取消"
+                            >
+                                <X size={14}/>
+                            </button>
+                            <div className="w-px h-3 bg-border mx-0.5"></div>
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); handleLogEdit(i, editLogValue); }}
+                                className="text-muted hover:text-dopamine p-1 rounded hover:bg-surface transition-colors"
+                                title="保存"
+                            >
+                                <Check size={14}/>
+                            </button>
                         </div>
                     </div>
                 ) : (
@@ -750,15 +889,31 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                                         <button 
                                             onClick={(e) => { e.stopPropagation(); handleRegenerateAt(i); }} 
                                             className="text-muted hover:text-dopamine p-1 rounded hover:bg-surface transition-colors" 
-                                            title="重新生成/分叉 (删除此条及后续，从本回合重新开始)"
+                                            title="分支/审阅"
                                         >
                                             <Scissors size={14}/>
                                         </button>
                                         <div className="w-px h-3 bg-border mx-0.5"></div>
                                     </>
                                 )}
+                                {/* Comment Button (Always visible) */}
                                 <button 
-                                    onClick={(e) => { e.stopPropagation(); setEditingLogIndex(i); setEditLogValue(line); }} 
+                                    onClick={(e) => { e.stopPropagation(); handleCommentAt(i); }} 
+                                    className="text-muted hover:text-accent-teal p-1 rounded hover:bg-surface transition-colors"
+                                    title="批注 (仅评论)"
+                                >
+                                    <MessageSquare size={14}/>
+                                </button>
+                                <div className="w-px h-3 bg-border mx-0.5"></div>
+                                
+                                <button 
+                                    onClick={(e) => { 
+                                        e.stopPropagation(); 
+                                        setEditingLogIndex(i); 
+                                        setEditLogValue(line);
+                                        const el = document.getElementById(domId);
+                                        if (el) setEditLogHeight(el.offsetHeight);
+                                    }} 
                                     className="text-muted hover:text-dopamine p-1 rounded hover:bg-surface transition-colors"
                                     title="编辑内容"
                                 >
@@ -767,7 +922,7 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                                 <button 
                                     onClick={(e) => { e.stopPropagation(); handleLogDelete(i); }} 
                                     className="text-muted hover:text-dopamine p-1 rounded hover:bg-surface transition-colors"
-                                    title="删除此条 (仅删除记录，不回滚状态)"
+                                    title="删除此条"
                                 >
                                     <Trash2 size={14}/>
                                 </button>
@@ -775,27 +930,39 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                                 <button 
                                     onClick={(e) => { e.stopPropagation(); enterUnveilMode(i); }} 
                                     className="text-muted hover:text-dopamine p-1 rounded hover:bg-surface transition-colors"
-                                    title="揭露 (Unveil) - 进入多选模式"
+                                    title="揭露"
                                 >
                                     <Book size={14}/>
                                 </button>
                             </div>
                         )}
 
-                        <div className="flex gap-2">
+                        <div className={`flex gap-2 ${isCompactLayout ? 'items-center' : ''}`}>
                             {isUnveilMode && (
-                                <div className={`mt-1 w-4 h-4 border rounded flex items-center justify-center shrink-0 ${isSelectedForUnveil ? 'bg-primary border-primary' : 'border-highlight'}`}>
+                                <div className={`${isCompactLayout ? '' : 'mt-1'} w-4 h-4 border rounded flex items-center justify-center shrink-0 ${isSelectedForUnveil ? 'bg-primary border-primary' : 'border-highlight'}`}>
                                     {isSelectedForUnveil && <div className="text-white text-[10px]">✓</div>}
                                 </div>
                             )}
-                            <div className="flex-1 min-w-0">
+                            {expandButton && (
+                                <div className={`shrink-0 flex -ml-1 ${isCompactLayout ? 'items-center' : 'items-start mt-0.5'}`}>
+                                    {expandButton}
+                                </div>
+                            )}
+                            <div className={`flex-1 min-w-0 ${isSystemLog ? 'border-l-2 border-border pl-2' : ''}`}>
                                 <div>
-                                    <span className="opacity-30 text-[10px] mr-3 select-none font-mono text-muted">
-                                        {systemTag}
-                                        {state.devMode && entry.locationId && <span className="ml-1 text-[8px] opacity-50">[{entry.locationId.substring(0,8)}]</span>}
-                                        {state.devMode && <span className="ml-1 text-[8px] opacity-30">T:{entry.turnIndex}</span>}
-                                    </span>
-                                    <span dangerouslySetInnerHTML={{__html: enrichLogText(displayContent)}}></span>
+                                    {systemTag && (
+                                        <span className="opacity-30 text-[10px] mr-3 select-none font-mono text-muted">
+                                            {systemTag}
+                                            {state.devMode && entry.locationId && <span className="ml-1 text-[8px] opacity-50">[{entry.locationId.substring(0,8)}]</span>}
+                                            {state.devMode && <span className="ml-1 text-[8px] opacity-30">T:{entry.turnIndex}</span>}
+                                        </span>
+                                    )}
+                                    <StreamAwareMarkdown 
+                                        logId={entry.id}
+                                        initialContent={displayContent}
+                                        isCompactLayout={isCompactLayout}
+                                        parseFn={enrichAndParseText}
+                                    />
                                 </div>
                                 
                                 {entry.images && entry.images.length > 0 && (
@@ -809,7 +976,6 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                                                     setEditingImageInfo({ logIndex: i, image: img });
                                                 }}
                                             >
-                                                {/* Adjusted background from bg-black to bg-black/50 for transparency friendliness */}
                                                 <div className="w-full relative bg-black/50 flex items-center justify-center">
                                                     <img 
                                                         src={img.base64} 
@@ -832,12 +998,36 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
         );
     };
 
+    const getNextCharText = () => {
+        const { currentOrder, turnIndex } = state.round;
+        const nextIndex = turnIndex + 1;
+        if (nextIndex >= currentOrder.length) {
+            return "下轮";
+        }
+        const nextCharId = currentOrder[nextIndex];
+        if (nextCharId.startsWith('env_')) {
+            return "环境";
+        }
+        return state.characters[nextCharId]?.name || "未知";
+    };
+    const nextCharText = getNextCharText();
+
+    const activeCharId = state.round.currentOrder[state.round.turnIndex];
+    const activeChar = state.characters[activeCharId];
+    const isPlayerTurn = activeChar?.isPlayer && state.round.phase === 'char_acting';
+
+    const handleNextAction = () => {
+        if (!isPlayerTurn) return;
+        if (onSkipPlayerTurn) {
+            onSkipPlayerTurn();
+        }
+    };
+
     return (
       <div 
         className="flex-1 flex flex-col min-w-0 relative transition-colors duration-500 font-medium"
         style={{ backgroundColor: 'var(--bg-story)', color: 'var(--text-story)' }}
       >
-          
           <div className={`absolute inset-0 pointer-events-none bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')] ${isLightMode ? 'opacity-25' : 'opacity-100'}`} />
 
           {showCharSelector && (
@@ -856,7 +1046,7 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
               />
           )}
 
-          <ProcessVisualizer state={state} onClearError={clearError} />
+          <ProcessVisualizer state={state} onClearError={clearError} openWindow={openWindow} getTopVisibleLogId={getTopVisibleLogId} />
           <LocationBar state={state} openWindow={openWindow} />
 
           <div className="flex-1 relative group">
@@ -864,44 +1054,41 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
 
             <div 
                 ref={scrollRef} 
-                className="absolute inset-0 overflow-y-auto p-4 md:p-6 space-y-4 font-serif leading-relaxed pt-14"
+                className="absolute inset-0 overflow-y-auto p-4 md:p-6 font-serif leading-relaxed pt-14 flex flex-col"
                 onScroll={handleScroll}
             >
-                {groupedHistory.map((group) => {
-                    // Case 1: Single Log (Non-System)
+                {/* Loader Indicator when paging available */}
+                {historyLimit < (state.world.history[state.world.history.length - 1]?.round || 0) && (
+                    <div className="text-center text-xs text-muted py-2 opacity-50 shrink-0">
+                        下滑以加载更多...
+                    </div>
+                )}
+                
+                {groupedHistory.map((group, currentIdx) => {
+                    let spaceTop = currentIdx === 0 ? "mt-0" : "mt-1";
+                    
                     if (group.type === 'single') {
-                        return renderLogItem(group.items[0].entry, group.items[0].index);
+                        return renderLogItem(group.items[0].entry, group.items[0].index, false, spaceTop);
                     }
-
-                    // Case 2: Grouped System Logs
-                    // Always show at least the first item
                     const isExpanded = expandedSystemGroups.has(group.id);
                     const firstItem = group.items[0];
+                    const expandBtn = group.items.length > 1 ? (
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); toggleGroup(group.id); }}
+                            className="text-muted opacity-50 hover:opacity-100 p-0.5 hover:bg-surface-highlight rounded transition-all"
+                            title={isExpanded ? "收起" : `展开 (${group.items.length - 1} 条更多)`}
+                        >
+                            {isExpanded ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+                        </button>
+                    ) : undefined;
 
                     return (
-                        <div key={group.id} className="relative group/system">
-                             <div className="relative">
-                                {/* Render the first item normally */}
-                                {renderLogItem(firstItem.entry, firstItem.index, true)}
-                                
-                                {/* Expansion Toggle Button - Only if more than 1 item */}
-                                {group.items.length > 1 && (
-                                    <button 
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            toggleGroup(group.id);
-                                        }}
-                                        className="absolute right-0 top-1 text-muted opacity-50 hover:opacity-100 p-1 hover:bg-surface-highlight rounded transition-all"
-                                        title={isExpanded ? "收起" : `展开 (${group.items.length - 1} 条更多)`}
-                                    >
-                                        {isExpanded ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
-                                    </button>
-                                )}
+                        <div key={group.id} className={`relative group/system flex flex-col ${spaceTop}`}>
+                             <div className="relative shrink-0">
+                                {renderLogItem(firstItem.entry, firstItem.index, true, '', expandBtn)}
                              </div>
-
-                             {/* Render Remaining Items if Expanded */}
                              {isExpanded && group.items.length > 1 && (
-                                 <div className="pl-2 border-l border-border/30 mt-1 space-y-1 animate-in slide-in-from-top-1 fade-in duration-200">
+                                 <div className="pl-6 border-l border-border/30 animate-in slide-in-from-top-1 fade-in duration-200 shrink-0">
                                      {group.items.slice(1).map((item) => (
                                          renderLogItem(item.entry, item.index, true)
                                      ))}
@@ -910,18 +1097,28 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                         </div>
                     );
                 })}
-                {state.world.history.length <= 1 && <div className="text-faint italic text-center mt-20">创建角色并解除暂停以开始故事...</div>}
+                {state.world.history.length <= 1 && <div className="text-faint italic text-center mt-20 shrink-0">创建角色并解除暂停以开始故事...</div>}
             </div>
 
-            {showScrollBottom && (
+            <div className="absolute bottom-4 right-6 z-40 flex items-center justify-end gap-2 animate-bounce pointer-events-none">
                 <button
-                    onClick={scrollToBottom}
-                    className="absolute bottom-4 right-6 z-40 bg-primary hover:bg-primary-hover text-primary-fg rounded-full p-2 shadow-lg animate-bounce transition-colors border border-primary/50"
-                    title="跳转至最新"
+                    onClick={handleNextAction}
+                    disabled={!isPlayerTurn}
+                    className={`bg-app/80 backdrop-blur-md border border-border text-primary rounded-full px-4 py-2 shadow-lg transition-colors flex items-center justify-center pointer-events-auto ${isPlayerTurn ? 'hover:bg-surface-highlight cursor-pointer' : 'cursor-not-allowed'}`}
+                    title={isPlayerTurn ? "跳过回合 / 下一位" : "当前为非玩家回合"}
                 >
-                    <ArrowDown size={20} />
+                    <span className="text-sm font-bold whitespace-nowrap">{nextCharText}</span>
                 </button>
-            )}
+                {showScrollBottom && (
+                    <button
+                        onClick={scrollToBottom}
+                        className="bg-app/80 backdrop-blur-md border border-border text-primary rounded-full p-2 shadow-lg hover:bg-surface-highlight transition-colors flex items-center justify-center pointer-events-auto"
+                        title="跳转至最新"
+                    >
+                        <ArrowDown size={20} />
+                    </button>
+                )}
+            </div>
 
             {isUnveilMode && (
                 <div className="absolute top-10 left-0 w-full flex justify-center pointer-events-none z-[60] animate-in slide-in-from-top-2 fade-in">
@@ -995,17 +1192,17 @@ export const StoryLog: React.FC<StoryLogProps> = ({ state, updateState, onConfir
                   className={`w-24 h-10 flex items-center justify-center gap-1 border rounded transition-all hover:bg-surface-highlight hover:text-highlight ${state.round.autoReaction ? 'text-primary font-bold border-primary bg-surface' : 'text-muted border-border bg-surface'}`}
                   title={state.round.autoReaction ? "玩家角色将自动使用AI反应" : "玩家角色需手动输入反应"}
               >
-                  <Zap size={16} className={state.round.autoReaction ? "fill-current" : ""} /> 
+                  <Zap size={16} className="text-primary"/>
                   <span className="text-xs">{state.round.autoReaction ? "自动反应" : "手动反应"}</span>
               </button>
 
               <button 
                   onClick={handleAutoRoundClick}
-                  className={`w-24 h-10 flex items-center justify-center gap-1 border border-border rounded transition-all hover:bg-surface-highlight ${state.round.autoAdvanceCount && state.round.autoAdvanceCount > 0 ? 'bg-info-base/20 text-info-fg border-info-base' : 'text-muted bg-surface'}`}
+                  className={`w-24 h-10 flex items-center justify-center gap-1 border rounded transition-all hover:bg-surface-highlight ${state.round.autoAdvanceCount && state.round.autoAdvanceCount > 0 ? 'bg-primary/20 text-primary border-primary' : 'text-muted border-border bg-surface'}`}
                   title="自动进行多轮"
               >
                   {state.round.autoAdvanceCount && state.round.autoAdvanceCount > 0 ? (
-                      <span className="font-mono font-bold animate-pulse">{state.round.autoAdvanceCount} 轮</span>
+                      <span className="font-mono font-bold animate-pulse text-primary">{state.round.autoAdvanceCount} 轮</span>
                   ) : (
                       <><FastForward size={18}/> 自动</>
                   )}

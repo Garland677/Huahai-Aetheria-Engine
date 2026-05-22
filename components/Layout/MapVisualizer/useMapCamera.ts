@@ -58,15 +58,50 @@ export const useMapCamera = (state: GameState, isLocked: boolean) => {
         }
     }, [state.map.activeLocationId]);
 
-    const updateCamera = (updater: (prev: CameraState) => CameraState) => {
-        setCamera(prev => updater(prev));
-    };
+    // Force map centering event
+    useEffect(() => {
+        const handleForceView = (e: CustomEvent) => {
+            if (isLocked) return;
+            const locId = e.detail;
+            if (locId && state.map.locations[locId]) {
+                const loc = state.map.locations[locId];
+                setCamera(prev => ({
+                    ...prev,
+                    pan: {
+                        x: loc.coordinates.x,
+                        y: loc.coordinates.y,
+                        z: loc.coordinates.z
+                    }
+                }));
+            }
+        };
+        window.addEventListener('force-view-location', handleForceView as EventListener);
+        return () => window.removeEventListener('force-view-location', handleForceView as EventListener);
+    }, [isLocked, state.map.locations]);
+
+    const updateCamera = useCallback((updater: (prev: CameraState) => CameraState) => {
+        setCamera(prev => {
+            const next = updater(prev);
+            cameraRef.current = next;
+            return next;
+        });
+    }, []);
+
+    const updateCameraRefOnly = useCallback((updater: (prev: CameraState) => CameraState) => {
+        cameraRef.current = updater(cameraRef.current);
+    }, []);
+
+    const syncCameraState = useCallback(() => {
+        setCamera(cameraRef.current);
+    }, []);
 
     return {
         camera,
         cameraRef,
         setCamera,
         updateCamera,
+        updateCameraRefOnly,
+        syncCameraState,
         resetView,
         getZ
     };

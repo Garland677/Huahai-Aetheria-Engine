@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { GameState, Character, MapLocation, MapRegion } from '../../types';
 import { Users, MapPin, Edit2, Trash2, ChevronDown, ChevronRight, Plus, Navigation, Copy, Sparkles, FolderOpen, Globe, UserPlus, Bot, CheckSquare, Square, Gift } from 'lucide-react';
@@ -7,6 +6,7 @@ import { Window } from '../ui/Window';
 import { LocationEditor } from './LocationEditor';
 import { AiGenWindow } from './Pools/AiGenWindow';
 import { propagateCharacterNameChange } from '../../services/characterUtils';
+import { generateCharacterId, generateConflictId, generateDriveId } from '../../services/idUtils';
 
 interface WorldCompositionWindowProps {
     winId: number;
@@ -14,7 +14,7 @@ interface WorldCompositionWindowProps {
     updateState: (updater: (current: GameState) => GameState) => void;
     closeWindow: (id: number) => void;
     openWindow: (type: any, data?: any) => void;
-    addLog: (text: string) => void;
+    addLog: (text: string, options?: any) => void;
     addDebugLog: (log: any) => void;
     data?: any; // Passed from openWindow (e.g. { targetCardId: '...' })
 }
@@ -92,7 +92,7 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
             // Put unknown last
             if (a.id === "unknown_region") return 1;
             if (b.id === "unknown_region") return -1;
-            return a.name.localeCompare(b.name, 'zh');
+            return (a.name || '').localeCompare(b.name || '', 'zh');
         });
 
         // 5. Structure Final Data
@@ -103,7 +103,7 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
             regionLocs.sort((a, b) => {
                 if (a.id === activeLocId) return -1;
                 if (b.id === activeLocId) return 1;
-                return a.name.localeCompare(b.name, 'zh');
+                return (a.name || '').localeCompare(b.name || '', 'zh');
             });
 
             return {
@@ -241,14 +241,34 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
     };
 
     const handleCopyCharacter = (originalChar: Character) => {
-        const newId = `char_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        const newId = generateCharacterId(state.characters);
         const newChar: Character = JSON.parse(JSON.stringify(originalChar));
         newChar.id = newId;
         newChar.name = `${originalChar.name}(复制)`;
         newChar.isPlayer = false;
         
-        if(newChar.drives) newChar.drives = newChar.drives.map((d, i) => ({...d, id: `drv_${newId}_${i}`}));
-        if(newChar.conflicts) newChar.conflicts = newChar.conflicts.map((c, i) => ({...c, id: `conf_${newId}_${i}`}));
+        // Use standardized ID generation for drives and conflicts
+        const usedDriveIds = new Set<string>();
+        (Object.values(state.characters) as Character[]).forEach(c => c.drives?.forEach(d => usedDriveIds.add(d.id)));
+        
+        const usedConflictIds = new Set<string>();
+        (Object.values(state.characters) as Character[]).forEach(c => c.conflicts?.forEach(x => usedConflictIds.add(x.id)));
+
+        if (newChar.drives) {
+            newChar.drives = newChar.drives.map(d => {
+                const did = generateDriveId(usedDriveIds);
+                usedDriveIds.add(did);
+                return { ...d, id: did };
+            });
+        }
+        
+        if (newChar.conflicts) {
+            newChar.conflicts = newChar.conflicts.map(c => {
+                const cid = generateConflictId(usedConflictIds);
+                usedConflictIds.add(cid);
+                return { ...c, id: cid };
+            });
+        }
 
         updateState(prev => ({
             ...prev,
@@ -447,8 +467,100 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
                                                             {!isActiveLoc && (
                                                                 <button 
                                                                     onClick={() => {
-                                                                        updateState(prev => ({ ...prev, map: { ...prev.map, activeLocationId: location.id } }));
-                                                                        addLog(`系统: 强制转移至 [${location.name}]`);
+                                                                        const viewingLocId = location.id;
+                                                                        const loc = location;
+                                                                        const currentLocId = state.map.activeLocationId;
+                                                                        
+                                                                        const movedCharacters: string[] = [];
+                                                                        const movedCharIds: string[] = [];
+                                                            
+                                                                        updateState(prev => {
+                                                                            const nextPos = { ...prev.map.charPositions };
+                                                                            const nextChars = { ...prev.characters };
+                                                                            
+                                                                            let maxId = 0;
+                                                                            (Object.values(prev.characters) as Character[]).forEach(c => {
+                                                                                c.conflicts?.forEach(x => {
+                                                                                    const n = parseInt(x.id);
+                                                                                    if (!isNaN(n) && n > maxId) maxId = n;
+                                                                                });
+                                                                            });
+                                                            
+                                                                            (Object.values(prev.characters) as Character[]).forEach(c => {
+                                                                                if (c.isFollowing) {
+                                                                                    const pos = nextPos[c.id];
+                                                                                    if (pos && pos.locationId === currentLocId) {
+                                                                                        nextPos[c.id] = {
+                                                                                            x: loc.coordinates.x,
+                                                                                            y: loc.coordinates.y,
+                                                                                            locationId: viewingLocId
+                                                                                        };
+                                                                                        
+                                                                                        movedCharacters.push(c.name);
+                                                                                        movedCharIds.push(c.id);
+                                                            
+                                                                                        maxId++;
+                                                                                        const updatedChar = { ...nextChars[c.id] };
+                                                                                        updatedChar.conflicts = [
+                                                                                            ...(updatedChar.conflicts || []),
+                                                                                            {
+                                                                                                id: String(maxId),
+                                                                                                desc: "刚到此地，对当地情况不熟悉",
+                                                                                                apReward: 2,
+                                                                                                solved: false
+                                                                                            }
+                                                                                        ];
+                                                                                        nextChars[c.id] = updatedChar;
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                            
+                                                                            const canSwitchImmediately = ['init', 'order', 'round_end'].includes(prev.round.phase);
+                                                                            
+                                                                            const nextActiveLocId = canSwitchImmediately ? viewingLocId : prev.map.activeLocationId;
+                                                                            const nextPendingLocId = canSwitchImmediately ? undefined : viewingLocId;
+                                                            
+                                                                            const currentTurnIndex = prev.round.turnIndex;
+                                                                            let nextCurrentOrder = [...prev.round.currentOrder];
+                                                                            
+                                                                            nextCurrentOrder = nextCurrentOrder.filter((charId, idx) => {
+                                                                                if (movedCharIds.includes(charId) && idx > currentTurnIndex) {
+                                                                                    return false;
+                                                                                }
+                                                                                return true;
+                                                                            });
+                                                            
+                                                                            return {
+                                                                                ...prev,
+                                                                                map: { 
+                                                                                    ...prev.map, 
+                                                                                    activeLocationId: nextActiveLocId,
+                                                                                    pendingActiveLocationId: nextPendingLocId,
+                                                                                    charPositions: nextPos
+                                                                                },
+                                                                                characters: nextChars,
+                                                                                round: {
+                                                                                    ...prev.round,
+                                                                                    currentOrder: nextCurrentOrder,
+                                                                                    useManualTurnOrder: canSwitchImmediately ? false : prev.round.useManualTurnOrder,
+                                                                                    defaultOrder: canSwitchImmediately ? [] : prev.round.defaultOrder,
+                                                                                    isWaitingForManualOrder: canSwitchImmediately ? false : prev.round.isWaitingForManualOrder
+                                                                                }
+                                                                            };
+                                                                        });
+                                                                        
+                                                                        movedCharacters.forEach(name => {
+                                                                            addLog(`${name} 移动前往了 [${loc.name}]。`, { type: 'action' });
+                                                                        });
+                                                                        
+                                                                        if (['init', 'order', 'round_end'].includes(state.round.phase)) {
+                                                                            addLog(`系统: 视角已立即切换至 [${loc.name}]。`);
+                                                                        } else {
+                                                                            addLog(`系统: 视角将在下一轮结算时切换至[${loc.name}]。`);
+                                                                        }
+
+                                                                        // Force map visualizer centering
+                                                                        window.dispatchEvent(new CustomEvent('force-view-location', { detail: location.id }));
                                                                     }}
                                                                     className="p-1.5 rounded hover:bg-primary hover:text-white text-muted transition-colors"
                                                                     title="移动至此"
@@ -468,7 +580,7 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
                                                                 className={`p-1.5 rounded transition-colors ${deleteConfirmId === location.id ? 'bg-danger text-white animate-pulse' : 'text-muted hover:text-danger-fg hover:bg-surface-highlight'}`}
                                                                 title="删除地点"
                                                             >
-                                                                {deleteConfirmId === location.id ? "!" : <Trash2 size={14}/>}
+                                                                <Trash2 size={14}/>
                                                             </button>
                                                         </div>
                                                     )}
@@ -520,7 +632,7 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
 
                                                                             {/* Character Actions (Hidden in Give Mode) */}
                                                                             {!targetCardId && (
-                                                                                <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0 ml-1">
+                                                                                <div className="flex items-center gap-3 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0 ml-2">
                                                                                     <button 
                                                                                         onClick={(e) => { e.stopPropagation(); handleCopyCharacter(char); }} 
                                                                                         className="text-muted hover:text-accent-teal transition-colors hover:bg-surface-highlight p-0.5 rounded"
@@ -540,7 +652,7 @@ export const WorldCompositionWindow: React.FC<WorldCompositionWindowProps> = ({
                                                                                         className={`transition-colors p-0.5 rounded hover:bg-surface-highlight ${deleteConfirmId === char.id ? 'text-danger animate-pulse font-bold' : 'hover:text-danger text-muted'}`}
                                                                                         title="删除"
                                                                                     >
-                                                                                        {deleteConfirmId === char.id ? "!" : <Trash2 size={12}/>}
+                                                                                        <Trash2 size={12}/>
                                                                                     </button>
                                                                                 </div>
                                                                             )}

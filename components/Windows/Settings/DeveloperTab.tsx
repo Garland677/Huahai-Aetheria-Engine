@@ -1,8 +1,11 @@
 
+
+
 import React, { useState } from 'react';
-import { AppSettings, DefaultSettings, LockedFeatures, GlobalContextConfig, WeatherType, Provider } from '../../../types';
+import { AppSettings, DefaultSettings, LockedFeatures, GlobalContextConfig, WeatherType, Provider, CustomEndpoint } from '../../../types';
 import { Button, Input, Label, TextArea } from '../../ui/Button';
-import { Lock, Unlock, Terminal, ShieldCheck, Clock, LayoutTemplate, Globe, Edit, Wind, Plus, Trash, FileText } from 'lucide-react';
+import { Lock, Unlock, Terminal, ShieldCheck, Clock, LayoutTemplate, Globe, Edit, Wind, Plus, Trash, FileText, Server, Wifi, Image as ImageIcon, Code, Box, Activity } from 'lucide-react';
+import { testModelConnection } from '../../../services/ai/core';
 
 interface DeveloperTabProps {
     localSettings: AppSettings;
@@ -37,6 +40,9 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
     onEditGlobalContext
 }) => {
     const [promptKey, setPromptKey] = useState<keyof typeof localDefaults.prompts>('determineCharacterAction');
+    const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
+    const [testingEndpoint, setTestingEndpoint] = useState<string | null>(null);
+    const [showSecrets, setShowSecrets] = useState(false);
 
     const handlePasswordKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') unlockKeys();
@@ -76,6 +82,74 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
             ...prev, 
             weatherConfig: prev.weatherConfig.filter((_, i) => i !== idx) 
         }));
+    };
+
+    // Custom Endpoint CRUD
+    const addCustomEndpoint = () => {
+        const newEp: CustomEndpoint = {
+            id: `cep_${Date.now()}`,
+            name: "New Custom Endpoint",
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "",
+            model: "",
+            enableVision: false,
+            enableJsonMode: true
+        };
+        setLocalSettings(prev => ({
+            ...prev,
+            customEndpoints: [...(prev.customEndpoints || []), newEp]
+        }));
+        setEditingEndpointId(newEp.id);
+    };
+
+    const updateCustomEndpoint = (id: string, updates: Partial<CustomEndpoint>) => {
+        setLocalSettings(prev => ({
+            ...prev,
+            customEndpoints: (prev.customEndpoints || []).map(ep => ep.id === id ? { ...ep, ...updates } : ep)
+        }));
+    };
+
+    const removeCustomEndpoint = (id: string) => {
+        if (!confirm("确定删除此自定义端点吗？")) return;
+        setLocalSettings(prev => ({
+            ...prev,
+            customEndpoints: (prev.customEndpoints || []).filter(ep => ep.id !== id)
+        }));
+        if (editingEndpointId === id) setEditingEndpointId(null);
+    };
+
+    const testCustomEndpoint = async (ep: CustomEndpoint) => {
+        if (!ep.model) {
+            alert("请先填写模型名称 (Model Name)。");
+            return;
+        }
+        setTestingEndpoint(ep.id);
+        
+        // Construct a temporary AIConfig to use existing test infrastructure
+        // Pass the endpoint list so createClient can resolve it
+        const testConfig = {
+            provider: Provider.CUSTOM,
+            model: ep.model,
+            customEndpointId: ep.id,
+            apiKey: ep.apiKey, // Override
+        };
+        
+        // We pass localSettings.customEndpoints to ensure we test the *current* state in UI, 
+        // not just what was saved before.
+        const currentEndpoints = localSettings.customEndpoints || [];
+        
+        try {
+            const result = await testModelConnection(testConfig as any, ep.apiKey || "", currentEndpoints);
+            if (result.success) {
+                alert(`连接成功！\n延时: ${result.latency}ms\n响应: "${result.response}"`);
+            } else {
+                alert(`连接失败！\n错误: ${result.response}`);
+            }
+        } catch (e: any) {
+            alert(`测试错误: ${e.message}`);
+        } finally {
+            setTestingEndpoint(null);
+        }
     };
 
     // Unified toggle for World Composition (Characters + Locations)
@@ -130,7 +204,7 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
                             <div className="flex items-center gap-2">
                                 <span className="text-[10px] text-muted hidden sm:inline">设置访问密码:</span>
                                 <Input 
-                                    type="password" 
+                                    type={showSecrets ? "text" : "password"}
                                     placeholder="留空为无密码" 
                                     className="h-6 w-24 sm:w-32 text-xs"
                                     value={localSettings.devPassword || ""}
@@ -141,15 +215,26 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
 
                         <div className="bg-surface-highlight/30 p-3 rounded border border-border space-y-4">
                             <div className="space-y-1">
-                                <label className="flex items-center gap-2 text-xs text-body cursor-pointer">
-                                    <input 
-                                        type="checkbox" 
-                                        checked={localSettings.encryptSaveFiles || false} 
-                                        onChange={e => setLocalSettings({...localSettings, encryptSaveFiles: e.target.checked})}
-                                        className="accent-primary"
-                                    /> 
-                                    <span>启用存档加密 (Encrypt Save Files)</span>
-                                </label>
+                                <div className="flex items-center gap-6">
+                                    <label className="flex items-center gap-2 text-xs text-body cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={localSettings.encryptSaveFiles || false} 
+                                            onChange={e => setLocalSettings({...localSettings, encryptSaveFiles: e.target.checked})}
+                                            className="accent-primary"
+                                        /> 
+                                        <span>启用存档加密 (Encrypt Save Files)</span>
+                                    </label>
+                                    <label className="flex items-center gap-2 text-xs text-body cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={showSecrets} 
+                                            onChange={e => setShowSecrets(e.target.checked)}
+                                            className="accent-primary"
+                                        /> 
+                                        <span>显示隐藏字段 (Show Secrets)</span>
+                                    </label>
+                                </div>
                                 <p className="text-[10px] text-muted ml-5">
                                     启用后，存档文件内容将被加密，且只能通过文件名作为密钥进行解密。
                                 </p>
@@ -228,9 +313,9 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
                         <p className="text-[10px] text-muted mt-1 ml-6">开启后，可以在主界面顶部访问 Debug Console 查看 AI 的原始输入输出。</p>
                     </div>
                     
-                    {/* API Keys Section */}
+                    {/* API Keys Section (Standard Providers) */}
                     <div className="space-y-4 border-b border-border pb-6">
-                        <Label className="text-primary uppercase tracking-wider font-bold">API 密钥管理</Label>
+                        <Label className="text-primary uppercase tracking-wider font-bold">API 密钥管理 (预置服务)</Label>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {[
                                 { key: Provider.GEMINI, label: 'Google Gemini Key' },
@@ -243,11 +328,170 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
                                 <div key={item.key}>
                                     <Label>{item.label}</Label>
                                     <Input 
-                                        type="password" 
+                                        type={showSecrets ? "text" : "password"}
                                         value={localSettings.apiKeys[item.key as Provider] || ''} 
                                         onChange={e => setLocalSettings({...localSettings, apiKeys: {...localSettings.apiKeys, [item.key]: e.target.value}})}
                                         placeholder=""
                                     />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Custom Endpoints Section */}
+                    <div className="space-y-4 border-b border-border pb-6">
+                        <div className="flex justify-between items-center">
+                            <Label className="text-primary uppercase tracking-wider font-bold flex items-center gap-2">
+                                <Server size={16}/> 自定义模型端点 (Custom Endpoints)
+                            </Label>
+                            <Button size="sm" variant="secondary" onClick={addCustomEndpoint}>
+                                <Plus size={14} className="mr-1"/> 添加端点
+                            </Button>
+                        </div>
+                        <p className="text-[10px] text-muted">
+                            支持 OpenAI 兼容接口（如 SiliconFlow, DeepSeek, Ollama, LM Studio 等）。
+                        </p>
+
+                        <div className="space-y-2">
+                            {(localSettings.customEndpoints || []).length === 0 && (
+                                <div className="text-center text-muted italic text-xs py-4 border border-dashed border-border rounded">
+                                    暂无自定义端点。点击上方按钮添加。
+                                </div>
+                            )}
+
+                            {(localSettings.customEndpoints || []).map(ep => (
+                                <div key={ep.id} className="bg-surface-highlight/20 border border-border rounded overflow-hidden">
+                                    {/* Header */}
+                                    <div 
+                                        className="flex items-center justify-between p-3 cursor-pointer hover:bg-surface-highlight/50 transition-colors"
+                                        onClick={() => setEditingEndpointId(editingEndpointId === ep.id ? null : ep.id)}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className={`w-2 h-2 rounded-full ${ep.baseUrl ? 'bg-success-base' : 'bg-danger-base'}`} />
+                                            <span className="text-sm font-bold text-body">{ep.name || "未命名端点"}</span>
+                                            <span className="text-xs text-muted font-mono hidden sm:inline">{ep.model || "No Model"}</span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                             <Button 
+                                                size="sm" 
+                                                variant="secondary" 
+                                                onClick={(e) => { e.stopPropagation(); testCustomEndpoint(ep); }}
+                                                className="h-7 px-2 text-xs"
+                                                disabled={testingEndpoint === ep.id}
+                                            >
+                                                {testingEndpoint === ep.id ? <Wifi size={12} className="animate-ping"/> : <Wifi size={12}/>} 测试
+                                            </Button>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); removeCustomEndpoint(ep.id); }}
+                                                className="p-1.5 text-muted hover:text-danger-fg hover:bg-surface rounded transition-colors"
+                                            >
+                                                <Trash size={14}/>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Details Editor */}
+                                    {editingEndpointId === ep.id && (
+                                        <div className="p-4 border-t border-border bg-black/10 animate-in slide-in-from-top-2">
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                                                <div>
+                                                    <Label>显示名称 (Display Name)</Label>
+                                                    <Input 
+                                                        value={ep.name} 
+                                                        onChange={e => updateCustomEndpoint(ep.id, { name: e.target.value })}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <Label>模型 ID (Model ID)</Label>
+                                                    <Input 
+                                                        value={ep.model || ""} 
+                                                        onChange={e => updateCustomEndpoint(ep.id, { model: e.target.value })}
+                                                        placeholder="e.g. deepseek-chat"
+                                                    />
+                                                </div>
+                                                <div className="sm:col-span-2">
+                                                    <Label>Base URL (API Endpoint)</Label>
+                                                    <Input 
+                                                        value={ep.baseUrl} 
+                                                        onChange={e => updateCustomEndpoint(ep.id, { baseUrl: e.target.value })}
+                                                        placeholder="https://api.openai.com/v1"
+                                                        className="font-mono text-xs"
+                                                    />
+                                                </div>
+                                                <div className="sm:col-span-2">
+                                                    <Label>API Key</Label>
+                                                    <Input 
+                                                        type={showSecrets ? "text" : "password"}
+                                                        value={ep.apiKey || ""} 
+                                                        onChange={e => updateCustomEndpoint(ep.id, { apiKey: e.target.value })}
+                                                        placeholder="sk-..."
+                                                        className="font-mono text-xs"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                                                <div>
+                                                    <Label>自定义 Headers (JSON)</Label>
+                                                    <TextArea 
+                                                        className="h-20 text-xs font-mono resize-none"
+                                                        value={ep.headers || ""}
+                                                        onChange={e => updateCustomEndpoint(ep.id, { headers: e.target.value })}
+                                                        placeholder='{"X-My-Header": "value"}'
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <Label>额外 Body 参数 (JSON)</Label>
+                                                    <TextArea 
+                                                        className="h-20 text-xs font-mono resize-none"
+                                                        value={ep.extraBody || ""}
+                                                        onChange={e => updateCustomEndpoint(ep.id, { extraBody: e.target.value })}
+                                                        placeholder='{"top_k": 50, "repetition_penalty": 1.1}'
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <div className="flex flex-wrap gap-4 items-center bg-surface p-2 rounded border border-border">
+                                                <Label className="mr-auto text-xs font-bold text-muted uppercase">能力开关 (Capabilities)</Label>
+                                                
+                                                <label className="flex items-center gap-2 cursor-pointer text-xs select-none">
+                                                    <input 
+                                                        type="checkbox" 
+                                                        checked={ep.enableVision} 
+                                                        onChange={e => updateCustomEndpoint(ep.id, { enableVision: e.target.checked })}
+                                                        className="accent-primary"
+                                                    />
+                                                    <ImageIcon size={14} className={ep.enableVision ? "text-primary" : "text-muted"}/> 视觉支持 (Vision)
+                                                </label>
+
+                                                <label className="flex items-center gap-2 cursor-pointer text-xs select-none">
+                                                    <input 
+                                                        type="checkbox" 
+                                                        checked={ep.enableJsonMode} 
+                                                        onChange={e => updateCustomEndpoint(ep.id, { enableJsonMode: e.target.checked })}
+                                                        className="accent-primary"
+                                                    />
+                                                    <Code size={14} className={ep.enableJsonMode ? "text-primary" : "text-muted"}/> 原生 JSON 模式
+                                                </label>
+                                            </div>
+                                            
+                                            <div className="mt-4">
+                                                <div className="flex justify-between items-center mb-1">
+                                                    <Label className="text-xs flex items-center gap-1"><Box size={12}/> 上下文窗口限制 (Max Context Window)</Label>
+                                                </div>
+                                                <Input 
+                                                    type="number"
+                                                    value={ep.contextWindow ?? ""}
+                                                    onChange={e => updateCustomEndpoint(ep.id, { contextWindow: e.target.value === '' ? undefined : parseInt(e.target.value) })}
+                                                    placeholder="留空使用全局默认 (Default)"
+                                                    className="w-full text-xs font-mono"
+                                                />
+                                                <p className="text-[10px] text-muted mt-1">
+                                                    有些模型支持超长上下文 (如 128k)，有些很短 (如 4k)。在此处设置可覆盖全局设置。
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             ))}
                         </div>
@@ -262,15 +506,41 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
                                 <div>
                                     <Label>初始 CP</Label>
-                                    <Input type="number" value={localDefaults.gameplay.defaultInitialCP} onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, defaultInitialCP: parseInt(e.target.value)}})} />
+                                    <Input type="number" value={localDefaults.gameplay.defaultInitialCP ?? ""} placeholder="Default" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, defaultInitialCP: e.target.value === '' ? undefined : parseInt(e.target.value)}})} />
                                 </div>
                                 <div>
                                     <Label>创造基础消耗 (CP)</Label>
-                                    <Input type="number" value={localDefaults.gameplay.defaultCreationCost} onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, defaultCreationCost: parseInt(e.target.value)}})} />
+                                    <Input type="number" value={localDefaults.gameplay.defaultCreationCost ?? ""} placeholder="Default" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, defaultCreationCost: e.target.value === '' ? undefined : parseInt(e.target.value)}})} />
                                 </div>
                                 <div>
                                     <Label>初始行动点 (AP)</Label>
-                                    <Input type="number" value={localDefaults.gameplay.defaultInitialAP} onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, defaultInitialAP: parseInt(e.target.value)}})} />
+                                    <Input type="number" value={localDefaults.gameplay.defaultInitialAP ?? ""} placeholder="Default" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, defaultInitialAP: e.target.value === '' ? undefined : parseInt(e.target.value)}})} />
+                                </div>
+                            </div>
+                            
+                            <Label className="mb-2 text-xs text-muted uppercase flex items-center gap-2">
+                                <Activity size={12}/> 数值平衡 (Gameplay Balance)
+                            </Label>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4 bg-surface-light/30 p-2 rounded border border-border/50">
+                                <div>
+                                    <Label>快感低阈值</Label>
+                                    <Input type="number" value={localDefaults.gameplay.pleasureThresholdLow ?? ""} placeholder="30" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, pleasureThresholdLow: e.target.value === '' ? undefined : parseInt(e.target.value)}})} />
+                                    <p className="text-[9px] text-muted">纯驱力模式</p>
+                                </div>
+                                <div>
+                                    <Label>快感高阈值</Label>
+                                    <Input type="number" value={localDefaults.gameplay.pleasureThresholdHigh ?? ""} placeholder="60" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, pleasureThresholdHigh: e.target.value === '' ? undefined : parseInt(e.target.value)}})} />
+                                    <p className="text-[9px] text-muted">纯矛盾模式</p>
+                                </div>
+                                <div>
+                                    <Label>快感衰减率 (0-1)</Label>
+                                    <Input type="number" step="0.05" max="1" min="0" value={localDefaults.gameplay.pleasureDecayRate ?? ""} placeholder="0.9" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, pleasureDecayRate: e.target.value === '' ? undefined : parseFloat(e.target.value)}})} />
+                                    <p className="text-[9px] text-muted">结算后比例</p>
+                                </div>
+                                <div>
+                                    <Label>体能回复率 (0-1)</Label>
+                                    <Input type="number" step="0.05" max="1" min="0" value={localDefaults.gameplay.physiqueRecoveryRate ?? ""} placeholder="0.2" onChange={e => setLocalDefaults({...localDefaults, gameplay: {...localDefaults.gameplay, physiqueRecoveryRate: e.target.value === '' ? undefined : parseFloat(e.target.value)}})} />
+                                    <p className="text-[9px] text-muted">结算后回复</p>
                                 </div>
                             </div>
 
@@ -392,10 +662,11 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
                                         type="range" 
                                         min="0" max="1" step="0.01"
                                         className="w-full accent-secondary-base"
-                                        value={localDefaults.weatherChangeProbability ?? 0.1}
+                                        value={localDefaults.weatherChangeProbability ?? ""}
+                                        placeholder="0.1"
                                         onChange={e => setLocalDefaults(prev => ({
                                             ...prev,
-                                            weatherChangeProbability: parseFloat(e.target.value)
+                                            weatherChangeProbability: e.target.value === '' ? undefined : parseFloat(e.target.value)
                                         }))}
                                     />
                                     <p className="text-[10px] text-muted mt-1">每一轮结束时触发世界状态重新随机的概率。设为 0 则完全不自动变化。</p>
@@ -407,7 +678,7 @@ export const DeveloperTab: React.FC<DeveloperTabProps> = ({
                                                 <Input value={w.name} onChange={e => updateWeather(idx, 'name', e.target.value)} placeholder="名称" className="flex-1 min-w-0"/>
                                                 <div className="flex items-center gap-1 shrink-0">
                                                     <span className="text-xs text-muted">权重:</span>
-                                                    <Input type="number" value={w.weight} onChange={e => updateWeather(idx, 'weight', parseFloat(e.target.value))} className="w-16"/>
+                                                    <Input type="number" value={w.weight ?? ""} placeholder="1" onChange={e => updateWeather(idx, 'weight', e.target.value === '' ? undefined : parseFloat(e.target.value))} className="w-16"/>
                                                 </div>
                                                 <button onClick={() => removeWeather(idx)} className="text-muted hover:text-danger-fg p-1 shrink-0"><Trash size={14}/></button>
                                             </div>

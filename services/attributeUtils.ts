@@ -13,7 +13,9 @@ export const removeInstances = (inventory: string[], idsToRemove: string[]): str
 };
 
 export const getAttr = (char: Character, key: string) => {
-    if (!char || !char.attributes) return undefined;
+    // Robustness: Check for empty key or missing char/attributes to prevent crashes
+    if (!char || !char.attributes || !key) return undefined;
+    
     if (char.attributes[key]) return char.attributes[key];
     const map: Record<string, string> = {
         'health': '健康', '健康': 'health',

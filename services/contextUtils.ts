@@ -1,5 +1,5 @@
 
-import { AttributeVisibility, Card, Character, ContextSegment, GameAttribute, MapLocation, MapRegion, PrizePool, CharPosition, GameImage } from "../types";
+import { AttributeVisibility, Card, Character, ContextSegment, GameAttribute, MapLocation, MapRegion, PrizePool, CharPosition, GameImage, GameState, StoryTag } from "../types";
 import { ImageContextBuilder } from "./ai/ImageContextBuilder";
 
 // --- Visibility Logic ---
@@ -64,14 +64,31 @@ const formatEffects = (effects: any[]) => {
 
 // --- Strict Context Formatters with Inline Image Support ---
 
+export const formatCharacterSecrets = (char: Character): string => {
+    if (!char.secrets || char.secrets.length === 0) return "无秘密。";
+    
+    // Filter unsolved secrets to warn AI
+    const unsolvedSecrets = char.secrets.filter(s => !s.solved);
+    
+    if (unsolvedSecrets.length === 0) return "所有秘密均已公开。";
+
+    const secretList = unsolvedSecrets.map(s => 
+        `- 秘密问题: "${s.question}" (答案: ${s.correctAnswer})`
+    ).join('\n');
+
+    return `
+注意！角色拥有以下未解开的秘密，请在描写时保持神秘感，不要直接泄露答案，除非角色在极度信任或被迫的情况下：
+${secretList}
+`.trim();
+};
+
 export const formatCharacterPersona = (char: Character, imageBuilder?: ImageContextBuilder): string => {
-    const appearanceImagesStr = imageBuilder?.registerList(char.appearanceImages, "外观参考图") || "";
+    // Removed appearanceImagesStr as it's handled in formatSelfDetailed (SELF_CONTEXT)
     const descImagesStr = imageBuilder?.registerList(char.descriptionImages, "设定参考图") || "";
 
     return `
 --- 角色与设定 ---
 姓名: ${char.name} (ID: ${char.id})
-[外观 (公开)]: ${char.appearance || "暂无外观描述"}${appearanceImagesStr}
 [描述/性格 (隐私)]:
 ${char.description || "无描述。"}${descImagesStr}
 `.trim();
@@ -190,6 +207,11 @@ export const formatOtherCharacters = (
     const othersStr = nearby.map(c => {
         const attrs = getVisibleAttributes(charId, c.id, c.attributes);
         
+        // Convert attributes object to Natural Language List
+        const attrLines = Object.entries(attrs)
+            .map(([k, v]) => `    ${k}: ${v.value}`)
+            .join('\n');
+        
         const allCards = [
             ...c.skills,
             ...c.inventory.map(id => cardPool.find(cp => cp.id === id)).filter(Boolean) as Card[]
@@ -227,11 +249,10 @@ export const formatOtherCharacters = (
             ? c.conflicts.filter(conf => !conf.solved).map(conf => `  ! [${c.name}的矛盾] ${conf.desc}`).join('\n')
             : "  (无活跃矛盾)";
 
-        // Drives removed from others context to focus on external behaviors/conflicts
-        
         return `> ${c.name} (ID: ${c.id}): 
   [外观]: ${appearanceStr}${charImageStr}
-  - 属性: ${JSON.stringify(attrs)}
+  [属性]:
+${attrLines}
   - 已知能力/物品:
 ${cardListStr}
   - 当前状态/矛盾:
@@ -253,7 +274,10 @@ export const formatSelfDetailed = (
 ): string => {
     const attrs = getVisibleAttributes(char.id, char.id, char.attributes);
     
-    // Drives list removed from Self Context to rely on specific instruction (PLEASURE_GOAL)
+    // Convert attributes object to Natural Language List
+    const attrLines = Object.entries(attrs)
+        .map(([k, v]) => `${k}: ${v.value}`)
+        .join('\n');
         
     const conflicts = char.conflicts && char.conflicts.length > 0
         ? char.conflicts.filter(c => !c.solved).map(c => `! [自身矛盾] ${c.desc}`).join('\n')
@@ -293,7 +317,8 @@ export const formatSelfDetailed = (
 --- 自身信息 (Self) ---
 LocationID: ${locationId || 'Unknown'}
 [外观]: ${char.appearance || "(未设定)"}${appearanceImagesStr}
-属性: ${JSON.stringify(attrs)}
+[属性]:
+${attrLines}
 
 [当前矛盾 (Self Conflicts)]
 ${conflicts}
@@ -305,4 +330,92 @@ ${activeStr}
 [被动/结算效果 (自动触发 - 请勿手动使用)]
 ${passiveStr}
 `.trim();
+};
+
+// --- New Helper: Get Round Participants (From Turn Order) ---
+export const getRoundParticipants = (state: GameState): Character[] => {
+    let orderIds = state.round.currentOrder || [];
+
+    // If current order is empty, try to recover the LAST known order from history
+    if (orderIds.length === 0 && state.world.history) {
+        // Scan backwards for last order log
+        for (let i = state.world.history.length - 1; i >= 0; i--) {
+            const content = state.world.history[i].content;
+            // Matches: "系统: 本轮行动顺序 (PC:1, NPC:2): [Name1, Name2]"
+            const match = content.match(/顺序.*\[(.*?)\]/);
+            if (match) {
+                const namesOrIds = match[1].split(',').map(s => s.trim()).filter(s => s);
+                const recoveredIds: string[] = [];
+                const allChars = Object.values(state.characters);
+                
+                namesOrIds.forEach(val => {
+                    // 1. Try ID
+                    if (state.characters[val]) {
+                        recoveredIds.push(val);
+                        return;
+                    }
+                    // 2. Try Name
+                    const candidates = allChars.filter(c => c.name === val);
+                    if (candidates.length > 0) {
+                         // Simple heuristic: Take the first match. 
+                         recoveredIds.push(candidates[0].id);
+                    }
+                });
+
+                if (recoveredIds.length > 0) {
+                    orderIds = recoveredIds;
+                    break; 
+                }
+            }
+        }
+    }
+
+    // Map IDs to Characters, filtering out missing ones
+    return orderIds
+        .map(id => state.characters[id])
+        .filter((c): c is Character => !!c);
+};
+
+// --- Updated: Format Life Trajectory Now ---
+// Now expects a specifically filtered list of characters (from getRoundParticipants)
+export const formatLifeTrajectoryNow = (characters: Character[]): string => {
+    if (!characters || characters.length === 0) return "(无相关人生轨迹 / No active round participants)";
+
+    // 1. Explicit ID Mapping Header for Context
+    const idList = characters.map(c => `- ${c.name}: ${c.id}`).join('\n');
+    const header = `[本轮登场角色列表 / Active Participants]\n${idList}\n\n`;
+
+    // 2. Filter characters with defined life trajectory
+    const relevantChars = characters.filter(c => c.lifeTrajectory && c.lifeTrajectory.current);
+    
+    if (relevantChars.length === 0) return header + "(无相关人生轨迹 / No active life trajectories)";
+
+    // 3. Randomize order to avoid bias
+    const shuffled = [...relevantChars].sort(() => Math.random() - 0.5);
+
+    // 4. Format output
+    const trajectories = shuffled.map(c => 
+        `[角色: ${c.name} (ID:${c.id})] 当前人生章节: "${c.lifeTrajectory!.current}"`
+    ).join('\n\n');
+
+    return header + trajectories;
+};
+
+// --- Story Tag Formatters ---
+export const formatFavorTags = (tags: StoryTag[] | undefined): string => {
+    if (!tags || tags.length === 0) return "（暂无）";
+
+    const liked = tags.filter(t => t.status === 'like').map(t => t.text);
+    const disliked = tags.filter(t => t.status === 'dislike').map(t => t.text);
+
+    let output = "";
+    if (liked.length > 0) output += `喜欢 (LIKE): [${liked.join(', ')}]\n`;
+    if (disliked.length > 0) output += `不喜欢 (DISLIKE): [${disliked.join(', ')}]`;
+
+    return output || "（暂无偏好）";
+};
+
+export const formatAllTags = (tags: StoryTag[] | undefined): string => {
+    if (!tags || tags.length === 0) return "";
+    return tags.map(t => t.text).join(", ");
 };

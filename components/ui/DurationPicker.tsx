@@ -37,23 +37,42 @@ const ScrollColumn: React.FC<{
 
     // Initial scroll position
     useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = value * itemHeight;
+        const el = scrollRef.current;
+        if (el) {
+            el.scrollTop = value * itemHeight;
         }
     }, []); // Run once on mount
+
+    // Handle Wheel specifically to scroll one line at a time
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+
+        const handleWheel = (e: WheelEvent) => {
+            e.preventDefault();
+            const direction = e.deltaY > 0 ? 1 : -1;
+            el.scrollBy({
+                top: direction * itemHeight,
+                behavior: 'smooth'
+            });
+        };
+
+        el.addEventListener('wheel', handleWheel, { passive: false });
+        return () => el.removeEventListener('wheel', handleWheel);
+    }, [itemHeight]);
 
     return (
         <div className="flex flex-col items-center w-14">
             <span className="text-[10px] text-muted uppercase font-bold mb-1">{label}</span>
-            <div className="relative h-40 w-full bg-surface-highlight/50 border-y border-border overflow-hidden rounded">
-                {/* Highlight Overlay */}
+            <div className="relative h-[120px] w-full bg-surface-highlight/50 overflow-hidden rounded">
+                {/* Highlight Overlay - Centered for 3 items (40px top padding + 40px item + 40px bottom padding) */}
                 <div className="absolute top-[40px] left-0 right-0 h-[40px] bg-primary/20 border-y border-primary/50 pointer-events-none z-10"></div>
                 
                 <div 
                     ref={scrollRef}
                     className="h-full overflow-y-scroll scrollbar-hide snap-y snap-mandatory"
                     onScroll={handleScroll}
-                    style={{ paddingTop: '40px', paddingBottom: '40px' }} // Pad to center first/last
+                    style={{ paddingTop: '40px', paddingBottom: '40px' }} // Pad to center first/last (40px + 40px + 40px = 120px total visible)
                 >
                     {items.map(i => (
                         <div 
@@ -93,7 +112,7 @@ export const DurationPicker: React.FC<DurationPickerProps> = ({ initialDuration,
                 <ScrollColumn label="年" range={100} value={val.y} onChange={v => setVal({...val, y: v})} />
                 <ScrollColumn label="月" range={12} value={val.m} onChange={v => setVal({...val, m: v})} />
                 <ScrollColumn label="日" range={31} value={val.d} onChange={v => setVal({...val, d: v})} />
-                <div className="w-px bg-border mx-1 h-32 self-center"></div>
+                <div className="w-px bg-border mx-1 h-24 self-center"></div>
                 <ScrollColumn label="时" range={24} value={val.h} onChange={v => setVal({...val, h: v})} />
                 <ScrollColumn label="分" range={60} value={val.min} onChange={v => setVal({...val, min: v})} />
                 <ScrollColumn label="秒" range={60} value={val.s} onChange={v => setVal({...val, s: v})} />

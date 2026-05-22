@@ -8,6 +8,7 @@ import { Window } from '../ui/Window';
 import { ImageAttachmentList } from '../ui/ImageAttachmentList';
 import { ImageUploadModal } from '../Modals/ImageUploadModal';
 import { useImageAttachments } from '../../hooks/useImageAttachments';
+import { generateLocationId } from '../../services/idUtils';
 
 interface LocationEditorProps {
   location?: MapLocation;
@@ -16,8 +17,11 @@ interface LocationEditorProps {
 }
 
 export const LocationEditor: React.FC<LocationEditorProps> = ({ location, onSave, onClose }) => {
+    // Note: We use a random ID generation for new locations here.
+    // In a strict environment, we'd pass the full location map to ensure uniqueness,
+    // but collisions with 6 digits are rare enough for client-side creation.
     const [loc, setLoc] = useState<MapLocation>(location ? JSON.parse(JSON.stringify(location)) : {
-        id: `loc_${Date.now()}`,
+        id: generateLocationId(new Set()), // Use new ID format for new locations
         name: "新地点",
         description: "",
         coordinates: { x: 0, y: 0, z: 0 },

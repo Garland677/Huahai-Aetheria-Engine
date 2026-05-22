@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { GameState, Character, Card, AttributeType, AttributeVisibility, DebugLog, GameAttribute, GameImage } from '../../../types';
+import { GameState, Character, Card, AttributeType, AttributeVisibility, DebugLog, GameAttribute, GameImage, Effect } from '../../../types';
 import { X, User, Bot, Loader2 } from 'lucide-react';
 import { Input, TextArea, Label, Button } from '../../ui/Button';
 import { generateCharacter, normalizeCard } from '../../../services/aiService';
@@ -12,18 +12,7 @@ import { generateRandomFlagAvatar } from '../../../assets/imageLibrary';
 import { useImageAttachments } from '../../../hooks/useImageAttachments';
 import { ImageAttachmentList } from '../../ui/ImageAttachmentList';
 import { ImageUploadModal } from '../../Modals/ImageUploadModal';
-
-// Helper for generating conflict IDs
-const getNextConflictId = (characters: Record<string, Character>): number => {
-    let max = 0;
-    Object.values(characters).forEach(c => {
-        c.conflicts?.forEach(x => {
-            const n = parseInt(x.id);
-            if (!isNaN(n) && n > max) max = n;
-        });
-    });
-    return max + 1;
-};
+import { generateCharacterId, generateCardId, generateConflictId, generateDriveId } from '../../../services/idUtils';
 
 export const AiGenWindow: React.FC<{
     state: GameState,
@@ -33,31 +22,26 @@ export const AiGenWindow: React.FC<{
     isPlayerMode?: boolean,
     addDebugLog?: (log: DebugLog) => void;
     onGenerationComplete?: () => void;
-    targetLocationId?: string; // New: Optional override for location
-    cost?: number; // New: Cost for generation (AP)
+    targetLocationId?: string; 
+    cost?: number; 
 }> = ({ state, updateState, addLog, onClose, isPlayerMode = false, addDebugLog, onGenerationComplete, targetLocationId, cost = 0 }) => {
     const [genName, setGenName] = useState("");
     const [genDesc, setGenDesc] = useState("");
     const [genStyle, setGenStyle] = useState("");
     
-    // Image Attachments: Appearance
     const appImgs = useImageAttachments();
-    // Image Attachments: Description/Settings
     const setImgs = useImageAttachments();
 
-    // Determine effective location
     const activeLocId = targetLocationId || state.map.activeLocationId;
     const activeLocName = activeLocId ? state.map.locations[activeLocId]?.name : "未知区域";
 
     const handleGenerate = () => {
-        // 1. Check Cost
         const currentAP = state.round.actionPoints;
         if (cost > 0 && currentAP < cost) {
             alert("行动点 (AP) 不足！");
             return;
         }
 
-        // 2. Pre-deduct Cost
         if (cost > 0) {
             updateState(prev => ({
                 ...prev,
@@ -68,10 +52,8 @@ export const AiGenWindow: React.FC<{
              addLog(`系统: [${activeLocName}] 添加角色中${isPlayerMode ? '(玩家)' : ''}`, { type: 'system' });
         }
 
-        // 3. Close the window immediately to unblock user
         onClose();
 
-        // 4. Prepare Context Variables (Synchronously capture current state)
         const loc = state.map.locations[activeLocId || ""];
         const region = loc && loc.regionId ? state.map.regions[loc.regionId] : null;
         
@@ -81,16 +63,12 @@ export const AiGenWindow: React.FC<{
             .join('\n');
 
         const modelConfig = state.charGenConfig || state.judgeConfig || DEFAULT_AI_CONFIG;
-
         const finalDesc = genDesc.trim() || "请根据当前地点和区域的背景设定，随机创作一个符合氛围的角色。";
         const finalStyle = genStyle.trim() || "请根据角色设定自动搭配合适的技能组。";
-
         const targetNameInput = genName.trim();
-
         const appearanceImages = appImgs.images;
         const settingImages = setImgs.images;
 
-        // 5. Run AI logic in background (Detached Promise)
         (async () => {
             try {
                 const suggestedNames = targetNameInput 
@@ -100,7 +78,7 @@ export const AiGenWindow: React.FC<{
                 const genData = await generateCharacter(
                     modelConfig,
                     finalDesc,
-                    finalStyle,
+                    finalStyle, // Passed to prompt for skill generation
                     loc ? loc.name : "未知荒野",
                     region ? region.name : "未探明区域",
                     localChars,
@@ -111,7 +89,7 @@ export const AiGenWindow: React.FC<{
                     state.world.worldGuidance,
                     suggestedNames,
                     state,
-                    (msg) => addLog(msg, { type: 'system' }), // Forward logs to system
+                    (msg) => addLog(msg, { type: 'system' }),
                     undefined, 
                     addDebugLog,
                     appearanceImages,
@@ -119,87 +97,115 @@ export const AiGenWindow: React.FC<{
                 ) as any;
 
                 if (genData) {
-                    const newId = `gen_${isPlayerMode ? 'player' : 'npc'}_${Date.now()}`;
-                    
-                    // Note: We access state inside updateState updater to ensure we use the LATEST state at write time
                     updateState(prev => {
-                        let nextConflictId = getNextConflictId(prev.characters);
-                        const newConflicts = (genData.conflicts || []).map((c: any) => ({
-                            ...c,
-                            id: String(nextConflictId++)
-                        }));
+                        const newId = generateCharacterId(prev.characters);
+
+                        const usedConflictIds = new Set<string>();
+                        (Object.values(prev.characters) as Character[]).forEach(c => c.conflicts?.forEach(x => usedConflictIds.add(x.id)));
+
+                        const usedDriveIds = new Set<string>();
+                        (Object.values(prev.characters) as Character[]).forEach(c => c.drives?.forEach(x => usedDriveIds.add(x.id)));
+
+                        const newConflicts = (genData.conflicts || []).map((c: any) => {
+                            const cid = generateConflictId(usedConflictIds);
+                            usedConflictIds.add(cid);
+                            return { ...c, id: cid };
+                        });
+
+                        const newDrives = (genData.drives || genData.creationTriggers || []).map((d: any) => {
+                            const did = generateDriveId(usedDriveIds);
+                            usedDriveIds.add(did);
+                            return { ...d, id: did };
+                        });
 
                         const rawSkills = genData.skills || [];
                         const uniqueAiSkills = rawSkills.filter((s: any) => {
                             const n = (s.name || "").toLowerCase();
                             return !['交易', '互动', '获取', 'trade', 'interact', 'acquire', '尝试获取'].some(k => n.includes(k));
                         });
+                        
+                        const usedCardIds = new Set(prev.cardPool.map(c => c.id));
 
                         const newSkills: Card[] = uniqueAiSkills.map((s: any, i: number) => {
-                            const isSettlement = s.trigger === 'settlement';
-                            const targetType = isSettlement ? 'self' : 'specific_char';
+                            const triggerType = s.triggerType || s.trigger || 'active';
+                            const isSettlement = triggerType === 'settlement';
+                            const cardId = generateCardId(usedCardIds);
+                            usedCardIds.add(cardId);
                             
-                            let effectVal = s.effect_val;
-                            const effectAttr = s.effect_attr || '健康';
-                            
-                            const isDynamic = (effectVal === undefined || effectVal === null);
-                            if (isDynamic) {
-                                effectVal = isSettlement ? 5 : -5;
+                            let effects: Effect[] = [];
+
+                            // NEW LOGIC: If AI provided a full effects array, use it directly.
+                            if (Array.isArray(s.effects) && s.effects.length > 0) {
+                                effects = s.effects.map((eff: any, eIdx: number) => ({
+                                    id: `eff_gen_${i}_${eIdx}`,
+                                    name: eff.name || '效果',
+                                    targetType: eff.targetType || (isSettlement ? 'self' : 'specific_char'),
+                                    targetAttribute: eff.targetAttribute || eff.attr || '健康',
+                                    value: eff.value ?? eff.val ?? (isSettlement ? 5 : -5),
+                                    dynamicValue: !!eff.dynamicValue,
+                                    conditionDescription: eff.conditionDescription || eff.condition || "True",
+                                    conditionContextKeys: eff.conditionContextKeys || []
+                                }));
+                            } else {
+                                // Legacy Fallback: Force a default Hit Check + 1 Effect
+                                let effectVal = s.effect_val;
+                                const effectAttr = s.effect_attr || '健康';
+                                const isDynamic = (effectVal === undefined || effectVal === null);
+                                if (isDynamic) effectVal = isSettlement ? 5 : -5;
+
+                                // 1. Hit Check
+                                effects.push({
+                                    id: `eff_hit_${i}`,
+                                    name: '命中/触发判定',
+                                    targetType: isSettlement ? 'self' : 'specific_char',
+                                    targetAttribute: '健康',
+                                    value: 0,
+                                    conditionDescription: s.condition || "True",
+                                    conditionContextKeys: []
+                                });
+                                // 2. Actual Effect
+                                effects.push({
+                                    id: `eff_res_${i}`,
+                                    name: '实际效果',
+                                    targetType: isSettlement ? 'self' : 'specific_char',
+                                    targetAttribute: effectAttr,
+                                    value: effectVal,
+                                    dynamicValue: false,
+                                    conditionDescription: "True", // Condition moved to hit check
+                                    conditionContextKeys: []
+                                });
                             }
 
-                            return {
-                                id: `card_${newId}_${i}`,
+                            const card: Card = {
+                                id: cardId,
                                 name: s.name,
                                 description: s.description || "AI Generated Skill",
-                                itemType: 'skill',
-                                triggerType: s.trigger || 'active',
+                                itemType: s.itemType || 'skill',
+                                triggerType: triggerType,
                                 cost: 0,
-                                effects: [
-                                    {
-                                        id: `eff_hit_${i}`,
-                                        name: '命中/触发判定',
-                                        targetType: targetType,
-                                        targetAttribute: '健康',
-                                        value: 0,
-                                        conditionDescription: s.condition || "True",
-                                        conditionContextKeys: []
-                                    },
-                                    {
-                                        id: `eff_res_${i}`,
-                                        name: '实际效果',
-                                        targetType: targetType,
-                                        targetAttribute: effectAttr,
-                                        value: effectVal,
-                                        dynamicValue: false,
-                                        conditionDescription: "True",
-                                        conditionContextKeys: []
-                                    }
-                                ]
+                                effects: effects,
+                                visibility: AttributeVisibility.PUBLIC
                             };
-                        }).map(normalizeCard);
+                            return normalizeCard(card);
+                        });
 
-                        if (!newSkills.some((s: any) => s.name.includes("获取") || s.id === defaultAcquireCard.id)) {
-                            newSkills.push(defaultAcquireCard);
-                        }
-                        if (!newSkills.some((s: any) => s.id === defaultTradeCard.id)) {
-                            newSkills.push(defaultTradeCard);
-                        }
-                        if (!newSkills.some((s: any) => s.id === defaultInteractCard.id)) {
-                            newSkills.push(defaultInteractCard);
-                        }
+                        const defAcquire = defaultAcquireCard as Card;
+                        const defTrade = defaultTradeCard as Card;
+                        const defInteract = defaultInteractCard as Card;
+
+                        if (!newSkills.some((s: any) => s.name.includes("获取") || s.id === defaultAcquireCard.id)) newSkills.push(defAcquire);
+                        if (!newSkills.some((s: any) => s.id === defaultTradeCard.id)) newSkills.push(defaultTradeCard);
+                        if (!newSkills.some((s: any) => s.id === defaultInteractCard.id)) newSkills.push(defaultInteractCard);
 
                         const rawAttributes = genData.attributes || {};
                         const finalAttributes: Record<string, GameAttribute> = {};
 
                         Object.entries(rawAttributes).forEach(([key, val]: [string, any]) => {
                             if (val === null || val === undefined) return;
-
                             let finalVal: string | number = 50;
                             let type = AttributeType.NUMBER;
 
-                            if (typeof val === 'number' || typeof val === 'string') {
-                                finalVal = val;
-                            } 
+                            if (typeof val === 'number' || typeof val === 'string') finalVal = val;
                             else if (typeof val === 'object') {
                                 if ('value' in val) finalVal = val.value;
                                 else finalVal = 50;
@@ -212,17 +218,9 @@ export const AiGenWindow: React.FC<{
                                 type = AttributeType.TEXT;
                                 finalVal = String(finalVal);
                             }
-
-                            finalAttributes[key] = {
-                                id: key,
-                                name: key,
-                                type: type,
-                                value: finalVal,
-                                visibility: AttributeVisibility.PUBLIC
-                            };
+                            finalAttributes[key] = { id: key, name: key, type: type, value: finalVal, visibility: AttributeVisibility.PUBLIC };
                         });
 
-                        // Ensure Core Attributes
                         if (!finalAttributes['创造点']) finalAttributes['创造点'] = { id: '创造点', name: '创造点', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC };
                         if (!finalAttributes['健康']) finalAttributes['健康'] = { id: '健康', name: '健康', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC };
                         if (!finalAttributes['体能']) finalAttributes['体能'] = { id: '体能', name: '体能', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC };
@@ -237,12 +235,12 @@ export const AiGenWindow: React.FC<{
                             name: genData.name || "AI角色",
                             appearance: genData.appearance || "普通的样貌",
                             description: genData.description || "...",
-                            style: genData.style || "",
+                            // style removed
                             avatarUrl: appearanceImages.length > 0 ? appearanceImages[0].base64 : generateRandomFlagAvatar(),
                             attributes: finalAttributes,
                             skills: newSkills,
                             inventory: [],
-                            drives: genData.drives || genData.creationTriggers || [],
+                            drives: newDrives,
                             conflicts: newConflicts,
                             aiConfig: { ...behaviorConfig }, 
                             contextConfig: { messages: [] },
@@ -277,16 +275,12 @@ export const AiGenWindow: React.FC<{
                     });
                     
                     addLog(`系统: ${isPlayerMode ? '神秘人物' : '当地人'} [${genData.name}] 已加入当前地点。`);
-                    
-                    if (onGenerationComplete) {
-                        onGenerationComplete();
-                    }
+                    if (onGenerationComplete) onGenerationComplete();
                 } else {
                     throw new Error("生成数据为空或无效");
                 }
             } catch (e: any) {
                 console.error("BG Gen Error", e);
-                // Refund cost on error
                 if (cost > 0) {
                      updateState(prev => ({
                         ...prev,

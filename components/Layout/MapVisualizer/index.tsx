@@ -14,7 +14,7 @@ interface MapVisualizerProps {
     onCreateLocation?: (x: number, y: number) => void;
 }
 
-export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationSelect, viewingLocationId, onCreateLocation }) => {
+const MapVisualizerComponent: React.FC<MapVisualizerProps> = ({ state, onLocationSelect, viewingLocationId, onCreateLocation }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [isExpanded, setIsExpanded] = useState(false);
@@ -23,7 +23,7 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
     const isMapLocked = state.appSettings.lockedFeatures?.mapView || false;
     
     // 1. Camera Logic
-    const { camera, cameraRef, updateCamera, resetView, getZ } = useMapCamera(state, isMapLocked);
+    const { camera, cameraRef, updateCamera, updateCameraRefOnly, syncCameraState, resetView, getZ } = useMapCamera(state, isMapLocked);
 
     // 2. Interaction Logic
     const { 
@@ -35,6 +35,8 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
         canvasRef,
         cameraRef,
         updateCamera,
+        updateCameraRefOnly,
+        syncCameraState,
         isMapLocked,
         state,
         getZ,
@@ -45,6 +47,60 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
 
     // 3. Renderer Instance
     const renderer = useMemo(() => new MapRenderer(), []);
+
+    // --- VISIBILITY OPTIMIZATION ---
+    const [isVisible, setIsVisible] = useState(true);
+    const [isRenderActive, setIsRenderActive] = useState(false);
+    
+    useEffect(() => {
+        // 1. Intersection Observer (Off-screen detection)
+        const observer = new IntersectionObserver(
+            ([entry]) => {
+                // Update visibility based on intersection AND document visibility
+                setIsVisible(entry.isIntersecting && document.visibilityState === 'visible');
+            },
+            { threshold: 0 } // Trigger as soon as even 1px is visible
+        );
+
+        if (containerRef.current) {
+            observer.observe(containerRef.current);
+        }
+
+        // 2. Document Visibility (Tab switching / Minimized)
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') {
+                setIsVisible(false);
+            } else {
+                // Force check or rely on IO? 
+                // If we tab back, IO should trigger if visible. 
+                // But to be safe, if we are expanded, we are definitely visible.
+                if (isExpanded) {
+                    setIsVisible(true);
+                }
+            }
+        };
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        return () => {
+            observer.disconnect();
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [isExpanded]); // Re-run when expansion state changes (DOM node recreation)
+
+    // Delayed Render Activation to prevent blocking UI transitions
+    useEffect(() => {
+        let timer: NodeJS.Timeout;
+        if (isVisible) {
+            // Delay rendering start to allow UI transitions (sliding) to complete
+            timer = setTimeout(() => {
+                setIsRenderActive(true);
+            }, 300);
+        } else {
+            setIsRenderActive(false);
+        }
+        return () => clearTimeout(timer);
+    }, [isVisible]);
 
     // Resize Observer
     useEffect(() => {
@@ -68,7 +124,14 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
     // ignoring unrelated state changes like Time or Logs.
     const mapState = state.map;
 
+    // HUD & Compass Refs for direct DOM manipulation
+    const hudRef = useRef<HTMLSpanElement>(null);
+    const compassRef = useRef<HTMLDivElement>(null);
+
     const renderFrame = useCallback(() => {
+        // SKIP RENDER IF NOT ACTIVE
+        if (!isRenderActive) return;
+
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no transparency
@@ -102,18 +165,43 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
             viewingLocationId,
             getZ
         );
-    }, [dimensions, camera, mapState, viewingLocationId, renderer, getZ]); // Depend on mapState, not full state
 
-    // Trigger Render on specific dependencies
+        // Update HUD directly
+        if (hudRef.current) {
+            const { x, y, z } = cameraRef.current.pan;
+            hudRef.current.textContent = `${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`;
+        }
+
+        // Update Compass directly
+        if (compassRef.current) {
+            const rot = -(cameraRef.current.yaw * 180 / Math.PI);
+            compassRef.current.style.transform = `rotate(${rot}deg)`;
+        }
+
+    }, [dimensions, mapState, viewingLocationId, renderer, getZ, isRenderActive]); // Depend on isRenderActive
+
+    // Animation Loop
     useEffect(() => {
-        renderFrame();
-    }, [renderFrame]);
+        let animationFrameId: number;
+
+        const loop = () => {
+            renderFrame();
+            animationFrameId = requestAnimationFrame(loop);
+        };
+
+        if (isRenderActive) {
+            loop();
+        }
+
+        return () => {
+            cancelAnimationFrame(animationFrameId);
+        };
+    }, [renderFrame, isRenderActive]);
 
     // UI & Styles
-    // Compass rotation: Invert yaw so compass points North relative to camera
-    const compassRotation = -(camera.yaw * 180 / Math.PI);
-    const normalContainerClass = "relative w-full h-64 bg-black overflow-hidden border-b border-slate-800";
-    const expandedContainerClass = "fixed inset-0 z-[200] bg-slate-950 flex flex-col touch-none"; 
+    // Compass rotation: Handled via ref now
+    const normalContainerClass = "map-visualizer-container relative w-full h-64 bg-black overflow-hidden border-b border-slate-800";
+    const expandedContainerClass = "map-visualizer-container fixed inset-0 z-[200] bg-slate-950 flex flex-col touch-none"; 
     const cursorClass = isCreatingLocation ? "cursor-copy" : "cursor-crosshair";
 
     const MapContent = (
@@ -127,9 +215,11 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
 
             {/* Compass HUD - Simple White Arrow */}
             <div 
+                ref={compassRef}
                 className="absolute left-4 z-10 pointer-events-none filter drop-shadow-md transition-transform duration-100 ease-linear will-change-transform" 
                 style={{ 
-                    transform: `rotate(${compassRotation}deg)`,
+                    // Initial rotation
+                    transform: `rotate(${-(camera.yaw * 180 / Math.PI)}deg)`,
                     // Use env(safe-area-inset-top) to avoid status bar overlap in expanded mode
                     top: isExpanded ? 'calc(env(safe-area-inset-top) + 16px)' : '16px'
                 }}
@@ -214,7 +304,7 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
             {!isExpanded && (
                 <div className="absolute bottom-2 right-2 pointer-events-none text-[10px] text-slate-500 font-mono shadow-black drop-shadow-md flex items-center gap-2 bg-black/40 px-2 rounded">
                     <Crosshair size={10}/> 
-                    <span>{camera.pan.x.toFixed(0)}, {camera.pan.y.toFixed(0)}, {camera.pan.z.toFixed(0)}</span>
+                    <span ref={hudRef}>{camera.pan.x.toFixed(0)}, {camera.pan.y.toFixed(0)}, {camera.pan.z.toFixed(0)}</span>
                 </div>
             )}
         </div>
@@ -223,3 +313,11 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({ state, onLocationS
     if (isExpanded) return createPortal(MapContent, document.body);
     return MapContent;
 };
+
+export const MapVisualizer = React.memo(MapVisualizerComponent, (prev, next) => {
+    return (
+        prev.state.map === next.state.map &&
+        prev.viewingLocationId === next.viewingLocationId &&
+        prev.state.appSettings.lockedFeatures?.mapView === next.state.appSettings.lockedFeatures?.mapView
+    );
+});

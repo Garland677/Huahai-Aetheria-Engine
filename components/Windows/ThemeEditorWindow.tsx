@@ -249,7 +249,7 @@ export const ThemeEditorWindow: React.FC<ThemeEditorWindowProps> = ({ winId, sta
                         <Label className="text-xs font-bold text-muted uppercase">基础配色 (Core)</Label>
                         <SelectItem target="baseHue" label="基础背景 (Base)" subLabel="应用背景、卡片底色" colorVar="var(--bg-app)" />
                         <SelectItem target="primaryHue" label="主色调 (Primary)" subLabel="核心按钮、高亮、重点" colorVar="var(--primary-base)" />
-                        <SelectItem target="secondaryHue" label="辅色调 (Accent)" subLabel="次要按钮、信息提示" colorVar="var(--info-base)" />
+                        <SelectItem target="secondaryHue" label="辅色调 (Accent)" subLabel="次要按钮、信息提示" colorVar="var(--secondary-base)" />
                         
                         <Label className="text-xs font-bold text-muted uppercase mt-4">故事日志配色 (Story Log)</Label>
                         <div className="grid grid-cols-2 gap-2">

@@ -16,6 +16,7 @@ export { normalizeCard } from "./cardUtils";
 export { generateCharacter } from "./ai/features/characterAI";
 export { determineCharacterAction, determineCharacterReaction } from "./ai/features/actionAI";
 export { checkConditionsBatch, analyzeSettlement } from "./ai/features/logicAI";
-export { determineTurnOrder, generateLocationDetails } from "./ai/features/worldAI";
-export { generateObservation, generateUnveil } from "./ai/features/narrativeAI";
+export { generateLocationDetails } from "./ai/features/worldAI";
+export { generateObservation, generateUnveil, generateStorySuggest } from "./ai/features/narrativeAI";
 export { generateLetter } from "./ai/features/mailAI";
+export { generateLife } from "./ai/features/lifeAI"; // New Export

@@ -7,6 +7,8 @@ interface UseMapInteractionProps {
     canvasRef: React.RefObject<HTMLCanvasElement>;
     cameraRef: React.MutableRefObject<CameraState>;
     updateCamera: (updater: (prev: CameraState) => CameraState) => void;
+    updateCameraRefOnly?: (updater: (prev: CameraState) => CameraState) => void;
+    syncCameraState?: () => void;
     isMapLocked: boolean;
     state: GameState;
     getZ: (x: number, y: number) => number;
@@ -19,6 +21,8 @@ export const useMapInteraction = ({
     canvasRef,
     cameraRef,
     updateCamera,
+    updateCameraRefOnly,
+    syncCameraState,
     isMapLocked,
     state,
     getZ,
@@ -40,6 +44,15 @@ export const useMapInteraction = ({
         lastSingle: { x: 0, y: 0 },
         isZooming: false
     });
+
+    // Helper to choose update method
+    const updateCam = (updater: (prev: CameraState) => CameraState) => {
+        if (updateCameraRefOnly) {
+            updateCameraRefOnly(updater);
+        } else {
+            updateCamera(updater);
+        }
+    };
 
     // --- Raycasting ---
     // Accurate raycast against terrain heightmap using binary search
@@ -154,6 +167,12 @@ export const useMapInteraction = ({
         if (document.pointerLockElement === canvasRef.current) {
             document.exitPointerLock();
         }
+        
+        // Sync state on mouse up if we were dragging
+        if (interactionState.current.isDragging && syncCameraState) {
+            syncCameraState();
+        }
+
         if (!interactionState.current.hasMoved) {
             const canvas = canvasRef.current;
             if (canvas && interactionState.current.dragButton === 0) {
@@ -187,7 +206,22 @@ export const useMapInteraction = ({
             if (isMapLocked) return;
             e.preventDefault();
             e.stopPropagation();
-            updateCamera(prev => ({ ...prev, scale: Math.max(0.02, Math.min(5.0, prev.scale - e.deltaY * 0.0005)) }));
+            updateCam(prev => ({ ...prev, scale: Math.max(0.02, Math.min(5.0, prev.scale - e.deltaY * 0.0005)) }));
+            // Debounce sync? For wheel it's tricky, maybe just let it be ref-only until next interaction or timer
+            // For now, wheel updates might not persist until next click if we don't sync.
+            // Let's sync on debounce if needed, but for now user didn't ask for wheel persistence specifically.
+            // Actually, let's sync on a timeout or just let it be.
+            // Better: sync immediately for wheel since it's discrete events usually, 
+            // OR just use updateCam which uses ref only.
+            // If we use ref only, React state 'camera' won't update, so HUD won't update.
+            // We need a loop in MapVisualizer to read ref for HUD if we want 60fps HUD.
+            // Or we just accept HUD lag.
+            // Let's add a debounced sync for wheel.
+            if (syncCameraState) {
+                // Simple debounce
+                clearTimeout((window as any)._wheelSyncTimeout);
+                (window as any)._wheelSyncTimeout = setTimeout(syncCameraState, 500);
+            }
         };
 
         const handleMouseMove = (e: MouseEvent) => {
@@ -209,7 +243,7 @@ export const useMapInteraction = ({
                 const dWx = dRx * cos + dRy * sin;
                 const dWy = -dRx * sin + dRy * cos;
 
-                updateCamera(prev => {
+                updateCam(prev => {
                     const nextX = prev.pan.x - dWx;
                     const nextY = prev.pan.y - dWy;
                     const nextZ = getZ(nextX, nextY);
@@ -217,7 +251,7 @@ export const useMapInteraction = ({
                 });
             } else {
                 // Left Click Rotate
-                updateCamera(prev => ({
+                updateCam(prev => ({
                     ...prev,
                     yaw: prev.yaw + dx * 0.005,
                     pitch: Math.max(0.1, Math.min(Math.PI / 2 - 0.1, prev.pitch - dy * 0.005))
@@ -251,7 +285,7 @@ export const useMapInteraction = ({
                 const dx = e.touches[0].clientX - touchState.current.lastSingle.x;
                 const dy = e.touches[0].clientY - touchState.current.lastSingle.y;
                 
-                updateCamera(prev => ({
+                updateCam(prev => ({
                     ...prev,
                     yaw: prev.yaw + dx * 0.01,
                     pitch: Math.max(0.1, Math.min(Math.PI / 2 - 0.1, prev.pitch - dy * 0.01))
@@ -263,7 +297,7 @@ export const useMapInteraction = ({
                 const dist = Math.sqrt(dx * dx + dy * dy);
                 const deltaDist = dist - touchState.current.lastDistance;
                 
-                updateCamera(prev => ({ ...prev, scale: Math.max(0.02, Math.min(5.0, prev.scale + deltaDist * 0.005)) }));
+                updateCam(prev => ({ ...prev, scale: Math.max(0.02, Math.min(5.0, prev.scale + deltaDist * 0.005)) }));
                 touchState.current.lastDistance = dist;
 
                 const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
@@ -279,7 +313,7 @@ export const useMapInteraction = ({
                 const dWx = dRx * cos + dRy * sin;
                 const dWy = -dRx * sin + dRy * cos;
 
-                updateCamera(prev => {
+                updateCam(prev => {
                     const nextX = prev.pan.x - dWx;
                     const nextY = prev.pan.y - dWy; 
                     const nextZ = getZ(nextX, nextY);
@@ -290,7 +324,10 @@ export const useMapInteraction = ({
         };
 
         const onTouchEnd = (e: TouchEvent) => {
-             if (e.touches.length === 0) touchState.current.isZooming = false;
+             if (e.touches.length === 0) {
+                 touchState.current.isZooming = false;
+                 if (syncCameraState) syncCameraState();
+             }
         };
 
         canvas.addEventListener('wheel', handleWheel, { passive: false });
@@ -306,7 +343,7 @@ export const useMapInteraction = ({
             canvas.removeEventListener('touchmove', onTouchMove);
             canvas.removeEventListener('touchend', onTouchEnd);
         };
-    }, [isMapLocked, dimensions]);
+    }, [isMapLocked, dimensions, updateCamera, updateCameraRefOnly, syncCameraState]);
 
     return {
         isCreatingLocation,

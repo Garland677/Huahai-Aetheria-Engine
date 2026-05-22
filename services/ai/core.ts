@@ -1,11 +1,12 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { AIConfig, Provider } from "../../types";
+import { AIConfig, Provider, CustomEndpoint } from "../../types";
 import { stripBase64Prefix } from "../imageUtils";
+import { imageStorage } from "../imageStorage";
 
 interface UnifiedClient {
     models: {
-        generateContent: (params: { model: string, contents: any[], config?: any }) => Promise<{ text: string }>,
+        generateContent: (params: { model: string, contents: any[], config?: any }) => Promise<{ text: string, raw: any }>,
         generateContentStream?: (params: { model: string, contents: any[], config?: any }) => Promise<AsyncIterable<{ text?: string }>>
     }
 }
@@ -23,7 +24,10 @@ export const dispatchAIStatus = (id: string, color: 'blue' | 'green' | 'yellow' 
 };
 
 // Helper to determine if a provider supports JSON mode enforcement
-export const supportsJsonMode = (provider: Provider): boolean => {
+export const supportsJsonMode = (provider: Provider, customConfig?: CustomEndpoint): boolean => {
+    if (provider === Provider.CUSTOM) {
+        return customConfig ? customConfig.enableJsonMode : true; // Default to true if not found, but usually controlled
+    }
     return [
         Provider.GEMINI, 
         Provider.VOLCANO, 
@@ -31,6 +35,58 @@ export const supportsJsonMode = (provider: Provider): boolean => {
         Provider.XAI, 
         Provider.OPENROUTER
     ].includes(provider);
+};
+
+// Helper: Pre-process contents to resolve Blob URLs -> Base64
+const resolveImagesInContents = async (contents: any[]): Promise<any[]> => {
+    const processedContents = await Promise.all(contents.map(async (c) => {
+        if (!c.parts) return c;
+        
+        const newParts = await Promise.all(c.parts.map(async (p: any) => {
+            // Check for inlineData
+            if (p.inlineData && p.inlineData.data) {
+                const rawData = p.inlineData.data;
+                // If it looks like a Blob URL or ID (not standard base64)
+                if (rawData.startsWith('blob:') || rawData.startsWith('img_')) {
+                    const resolvedBase64 = await imageStorage.resolveBase64(rawData);
+                    if (resolvedBase64) {
+                        return {
+                            inlineData: {
+                                mimeType: p.inlineData.mimeType,
+                                data: stripBase64Prefix(resolvedBase64) // Gemini/Generic handlers usually want raw
+                            }
+                        };
+                    }
+                }
+            }
+            // Also check for image_url type (OpenAI format if manually constructed somewhere)
+            if (p.image_url && p.image_url.url) {
+                 const url = p.image_url.url;
+                 if (url.startsWith('blob:') || url.startsWith('img_')) {
+                     const resolvedBase64 = await imageStorage.resolveBase64(url);
+                     if (resolvedBase64) {
+                         return { ...p, image_url: { ...p.image_url, url: resolvedBase64 } };
+                     }
+                 }
+            }
+            return p;
+        }));
+        
+        return { ...c, parts: newParts };
+    }));
+    return processedContents;
+};
+
+// Helper: Filter out images from content parts if Vision is disabled
+const filterImagesFromMessages = (messages: any[]): any[] => {
+    return messages.map(m => {
+        if (Array.isArray(m.content)) {
+            const textParts = m.content.filter((p: any) => p.type === 'text');
+            // If filtering leaves nothing, use empty string to prevent API errors
+            return { ...m, content: textParts.length > 0 ? textParts : "" };
+        }
+        return m;
+    });
 };
 
 // Helper: Convert Gemini format messages to OpenAI format
@@ -66,7 +122,6 @@ const convertGeminiToOpenAIMessages = (contents: any[]) => {
 
         // Flatten if simple string, otherwise use array.
         // Filter out empty text parts if we have mixed content (e.g. image + empty string)
-        // because some strict parsers choke on empty text blocks in multimodal arrays.
         let finalContent: any = contentArray;
         
         if (contentArray.length > 1) {
@@ -89,16 +144,20 @@ const convertGeminiToOpenAIMessages = (contents: any[]) => {
     });
 };
 
-export const createClient = (config: AIConfig, apiKeys: Record<string, string>): UnifiedClient => {
+export const createClient = (config: AIConfig, apiKeys: Record<string, string>, customEndpoints: CustomEndpoint[] = []): UnifiedClient => {
     const apiKey = config.apiKey || apiKeys[config.provider] || "";
     
+    // --- GEMINI HANDLER ---
     if (config.provider === Provider.GEMINI) {
         const ai = new GoogleGenAI({ apiKey });
         return {
             models: {
                 generateContent: async (params) => {
+                    // Resolve Images (Blob -> Base64)
+                    const resolvedContents = await resolveImagesInContents(params.contents);
+
                     // Pre-process contents to strip base64 headers for Gemini
-                    const processedContents = params.contents.map(c => ({
+                    const processedContents = resolvedContents.map(c => ({
                         ...c,
                         parts: c.parts.map((p: any) => {
                             if (p.inlineData && p.inlineData.data) {
@@ -113,16 +172,27 @@ export const createClient = (config: AIConfig, apiKeys: Record<string, string>):
                         })
                     }));
 
+                    // Inject JSON Priming for Gemini to prevent empty response
+                    if (params.config?.responseMimeType === 'application/json') {
+                         processedContents.push({
+                             role: 'model',
+                             parts: [{ text: "好的，我现在开始以JSON输出：" }]
+                         });
+                    }
+
                     const res = await ai.models.generateContent({
                         model: params.model,
                         contents: processedContents,
                         config: params.config
                     });
-                    return { text: res.text || "" };
+                    // Return both text and raw response object
+                    return { text: res.text || "", raw: res };
                 },
                 generateContentStream: async (params) => {
-                    // Similar preprocessing for stream
-                    const processedContents = params.contents.map(c => ({
+                    // Resolve Images
+                    const resolvedContents = await resolveImagesInContents(params.contents);
+
+                    const processedContents = resolvedContents.map(c => ({
                         ...c,
                         parts: c.parts.map((p: any) => {
                             if (p.inlineData && p.inlineData.data) {
@@ -136,6 +206,14 @@ export const createClient = (config: AIConfig, apiKeys: Record<string, string>):
                             return p;
                         })
                     }));
+
+                    // Inject JSON Priming for Gemini
+                    if (params.config?.responseMimeType === 'application/json') {
+                         processedContents.push({
+                             role: 'model',
+                             parts: [{ text: "好的，我现在开始以JSON输出：" }]
+                         });
+                    }
 
                     const res = await ai.models.generateContentStream({
                         model: params.model,
@@ -154,43 +232,83 @@ export const createClient = (config: AIConfig, apiKeys: Record<string, string>):
         }
     }
     
-    // Fallback for OpenAI compatible providers
+    // --- OPENAI COMPATIBLE HANDLER (STANDARD & CUSTOM) ---
     return {
         models: {
             generateContent: async (params) => {
-                const baseURLs: Record<string, string> = {
-                    [Provider.XAI]: "https://api.x.ai/v1",
-                    [Provider.OPENAI]: "https://api.openai.com/v1",
-                    [Provider.OPENROUTER]: "https://openrouter.ai/api/v1",
-                    [Provider.VOLCANO]: "https://ark.cn-beijing.volces.com/api/v3",
-                    [Provider.CLAUDE]: "https://api.anthropic.com/v1"
-                };
-                
-                const baseURL = baseURLs[config.provider] || "https://api.openai.com/v1";
-                
-                const messages = convertGeminiToOpenAIMessages(params.contents);
+                let baseURL = "https://api.openai.com/v1";
+                let effectiveApiKey = apiKey;
+                let enableVision = true;
+                let enableJsonMode = true;
+                let extraBody: any = {};
+                let extraHeaders: any = {};
+
+                // Handle Custom Provider
+                if (config.provider === Provider.CUSTOM) {
+                    const endpoint = customEndpoints.find(e => e.id === config.customEndpointId);
+                    if (endpoint) {
+                        baseURL = endpoint.baseUrl.replace(/\/$/, ""); // Strip trailing slash
+                        if (endpoint.apiKey) effectiveApiKey = endpoint.apiKey;
+                        enableVision = endpoint.enableVision;
+                        enableJsonMode = endpoint.enableJsonMode;
+                        
+                        try {
+                            if (endpoint.extraBody) Object.assign(extraBody, JSON.parse(endpoint.extraBody));
+                            if (endpoint.headers) Object.assign(extraHeaders, JSON.parse(endpoint.headers));
+                        } catch (e) {
+                            console.warn("Failed to parse custom JSON params", e);
+                        }
+                    } else {
+                        // Fallback if endpoint deleted
+                        console.warn("Selected custom endpoint not found, using OpenAI default.");
+                    }
+                } else {
+                    // Standard Providers
+                    const baseURLs: Record<string, string> = {
+                        [Provider.XAI]: "https://api.x.ai/v1",
+                        [Provider.OPENAI]: "https://api.openai.com/v1",
+                        [Provider.OPENROUTER]: "https://openrouter.ai/api/v1",
+                        [Provider.VOLCANO]: "https://ark.cn-beijing.volces.com/api/v3",
+                        [Provider.CLAUDE]: "https://api.anthropic.com/v1"
+                    };
+                    baseURL = baseURLs[config.provider] || baseURL;
+                }
+
+                // Resolve Images
+                const resolvedContents = await resolveImagesInContents(params.contents);
+                let messages = convertGeminiToOpenAIMessages(resolvedContents);
+
+                // Vision Capability Check
+                if (!enableVision) {
+                    messages = filterImagesFromMessages(messages);
+                }
 
                 const bodyPayload: any = {
                     model: params.model,
                     messages: messages,
                     temperature: config.temperature,
+                    ...extraBody // Merge extra params
                 };
 
-                // Add Reasoning Effort only if explicitly set and NOT 'minimal'
-                if (config.reasoningEffort && config.reasoningEffort !== 'minimal') {
+                // Add Reasoning Effort only if explicitly set and NOT 'none' (mostly for standard O1/O3)
+                if (config.reasoningEffort && config.reasoningEffort !== 'none') {
                      bodyPayload.reasoning_effort = config.reasoningEffort;
                 }
 
-                // Translate internal config to OpenAI compatible response_format
+                // JSON Mode Logic
                 if (params.config?.responseMimeType === 'application/json') {
-                    bodyPayload.response_format = { type: "json_object" };
+                    if (enableJsonMode) {
+                        bodyPayload.response_format = { type: "json_object" };
+                    }
+                    // Even if json mode is disabled, we rely on prompt engineering (handled in feature prompts)
                 }
 
                 const response = await fetch(`${baseURL}/chat/completions`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`
+                        'Authorization': `Bearer ${effectiveApiKey}`,
+                        ...extraHeaders
                     },
                     body: JSON.stringify(bodyPayload)
                 });
@@ -201,36 +319,63 @@ export const createClient = (config: AIConfig, apiKeys: Record<string, string>):
                 }
 
                 const data = await response.json();
-                return { text: data.choices?.[0]?.message?.content || "" };
+                // Return text and the full raw data JSON
+                return { text: data.choices?.[0]?.message?.content || "", raw: data };
             },
+            
             generateContentStream: async (params) => {
-                const baseURLs: Record<string, string> = {
-                    [Provider.XAI]: "https://api.x.ai/v1",
-                    [Provider.OPENAI]: "https://api.openai.com/v1",
-                    [Provider.OPENROUTER]: "https://openrouter.ai/api/v1",
-                    [Provider.VOLCANO]: "https://ark.cn-beijing.volces.com/api/v3",
-                    [Provider.CLAUDE]: "https://api.anthropic.com/v1"
-                };
+                let baseURL = "https://api.openai.com/v1";
+                let effectiveApiKey = apiKey;
+                let enableVision = true;
+                let enableJsonMode = true;
+                let extraBody: any = {};
+                let extraHeaders: any = {};
+
+                // Handle Custom Provider (Stream)
+                if (config.provider === Provider.CUSTOM) {
+                    const endpoint = customEndpoints.find(e => e.id === config.customEndpointId);
+                    if (endpoint) {
+                        baseURL = endpoint.baseUrl.replace(/\/$/, "");
+                        if (endpoint.apiKey) effectiveApiKey = endpoint.apiKey;
+                        enableVision = endpoint.enableVision;
+                        enableJsonMode = endpoint.enableJsonMode;
+                        try {
+                            if (endpoint.extraBody) Object.assign(extraBody, JSON.parse(endpoint.extraBody));
+                            if (endpoint.headers) Object.assign(extraHeaders, JSON.parse(endpoint.headers));
+                        } catch (e) {}
+                    }
+                } else {
+                    const baseURLs: Record<string, string> = {
+                        [Provider.XAI]: "https://api.x.ai/v1",
+                        [Provider.OPENAI]: "https://api.openai.com/v1",
+                        [Provider.OPENROUTER]: "https://openrouter.ai/api/v1",
+                        [Provider.VOLCANO]: "https://ark.cn-beijing.volces.com/api/v3",
+                        [Provider.CLAUDE]: "https://api.anthropic.com/v1"
+                    };
+                    baseURL = baseURLs[config.provider] || baseURL;
+                }
                 
-                const baseURL = baseURLs[config.provider] || "https://api.openai.com/v1";
-                
-                const messages = convertGeminiToOpenAIMessages(params.contents);
+                // Resolve Images
+                const resolvedContents = await resolveImagesInContents(params.contents);
+                let messages = convertGeminiToOpenAIMessages(resolvedContents);
+
+                if (!enableVision) {
+                    messages = filterImagesFromMessages(messages);
+                }
 
                 const bodyPayload: any = {
                     model: params.model,
                     messages: messages,
                     temperature: config.temperature,
-                    stream: true // Enable Streaming
+                    stream: true, // Enable Streaming
+                    ...extraBody
                 };
 
-                // Add Reasoning Effort only if explicitly set and NOT 'minimal'
-                if (config.reasoningEffort && config.reasoningEffort !== 'minimal') {
+                if (config.reasoningEffort && config.reasoningEffort !== 'none') {
                      bodyPayload.reasoning_effort = config.reasoningEffort;
                 }
 
-                // OpenAI streaming handles json_object mode, but sometimes breaks partial JSONs. 
-                // We typically use text stream for better robustness in this custom implementation.
-                if (params.config?.responseMimeType === 'application/json') {
+                if (params.config?.responseMimeType === 'application/json' && enableJsonMode) {
                     bodyPayload.response_format = { type: "json_object" };
                 }
 
@@ -238,7 +383,8 @@ export const createClient = (config: AIConfig, apiKeys: Record<string, string>):
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`
+                        'Authorization': `Bearer ${effectiveApiKey}`,
+                        ...extraHeaders
                     },
                     body: JSON.stringify(bodyPayload)
                 });
@@ -290,14 +436,15 @@ export const createClient = (config: AIConfig, apiKeys: Record<string, string>):
     }
 }
 
-// --- Connection Test Utility ---
+// ... existing connection test utility ...
 export const testModelConnection = async (
     config: AIConfig,
-    apiKey: string
+    apiKey: string,
+    customEndpoints: CustomEndpoint[] = []
 ): Promise<{ success: boolean; response: string; requestDetails: any; latency: number }> => {
     const start = Date.now();
     // Create a temporary client with the specific key
-    const client = createClient(config, { [config.provider]: apiKey });
+    const client = createClient(config, { [config.provider]: apiKey }, customEndpoints);
     
     const testMessage = "Hello! Please reply with 'Connection Successful' if you receive this.";
     const contents = [{ role: 'user', parts: [{ text: testMessage }] }];
@@ -318,7 +465,8 @@ export const testModelConnection = async (
                 model: config.model,
                 endpoint: config.provider === 'gemini' ? 'GoogleGenAI SDK' : 'REST /chat/completions',
                 messages: contents,
-                reasoningEffort: config.reasoningEffort
+                reasoningEffort: config.reasoningEffort,
+                fullResponse: result.raw // Capture full response for debug
             }
         };
     } catch (e: any) {
@@ -338,10 +486,11 @@ export const testModelConnection = async (
 };
 
 export const robustGenerate = async <T>(
-    callApi: () => Promise<{ text: string }>,
+    callApi: () => Promise<{ text: string, raw: any }>,
     validator: (json: any) => any,
     maxRetries: number = 3,
-    onFailure?: (error: any, rawResponse?: string) => void
+    onFailure?: (error: any, rawResponse?: string) => void,
+    onSuccess?: (raw: any) => void
 ): Promise<T | null> => {
     let attempts = 0;
     // Generate a unique ID for this specific request sequence
@@ -363,6 +512,12 @@ export const robustGenerate = async <T>(
             const validated = validator(json);
             if (validated) {
                 dispatchAIStatus(requestId, 'green'); // Success
+                
+                // Invoke Success Callback with RAW data
+                if (onSuccess) {
+                    onSuccess(result.raw);
+                }
+                
                 return json as T;
             } else {
                 throw new Error("Validation Failed");

@@ -12,7 +12,7 @@ const FALLBACK_NAMES = [
     "郑洁", "王军", "郭涛", "宋丹", "马超", "韩梅", "曹颖", "许巍", "邓超", "苏有朋"
 ];
 
-export const getRandomChineseNames = async (count: number = 10): Promise<string[]> => {
+export const getRandomChineseNames = async (count: number = 4): Promise<string[]> => {
     let allNames: string[] = [];
 
     // 1. 优先级最高：检查本地内联的原始数据 (用户粘贴在文件末尾的内容)

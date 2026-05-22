@@ -2,8 +2,26 @@
 import React, { useState, useEffect } from 'react';
 import { GameState, Character } from '../../types';
 import { Button } from '../ui/Button';
-import { ListOrdered, ArrowUp, ArrowDown, Trash2, Plus, Check } from 'lucide-react';
+import { ListOrdered, Trash2, Plus, Check, GripVertical } from 'lucide-react';
 import { Window } from '../ui/Window';
+import {
+  DndContext, 
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 
 interface ManualOrderModalProps {
     isOpen: boolean;
@@ -13,8 +31,70 @@ interface ManualOrderModalProps {
     addLog: (msg: string) => void;
 }
 
+interface SortableOrderItemData {
+    uniqueId: string;
+    charId: string;
+}
+
+const generateId = () => Math.random().toString(36).substr(2, 9);
+
+const SortableOrderItem = ({ 
+    item, 
+    index, 
+    charName, 
+    onRemove 
+}: { 
+    item: SortableOrderItemData; 
+    index: number; 
+    charName: string; 
+    onRemove: (id: string) => void;
+}) => {
+    const {
+        attributes,
+        listeners,
+        setNodeRef,
+        transform,
+        transition,
+        isDragging
+    } = useSortable({ id: item.uniqueId });
+
+    const style = {
+        transform: CSS.Translate.toString(transform),
+        transition,
+        zIndex: isDragging ? 999 : 'auto',
+        position: 'relative' as const,
+        touchAction: 'none'
+    };
+
+    return (
+        <div 
+            ref={setNodeRef} 
+            style={style} 
+            className={`flex items-center bg-surface p-2 rounded border gap-2 group transition-colors mb-2 ${isDragging ? 'border-primary/50 shadow-lg opacity-50' : 'border-border hover:border-primary/50'}`}
+        >
+            <div 
+                className="cursor-move text-muted hover:text-body px-1 touch-none" 
+                {...attributes} 
+                {...listeners}
+            >
+                <GripVertical size={14}/>
+            </div>
+            <span className="text-muted font-mono w-6 text-center text-xs">{index + 1}</span>
+            <div className="flex-1 font-bold text-body text-sm truncate">{charName}</div>
+            <div className="flex gap-1 shrink-0">
+                <button 
+                    onClick={() => onRemove(item.uniqueId)} 
+                    className="p-1 hover:bg-danger/20 rounded text-muted hover:text-danger-fg"
+                >
+                    <Trash2 size={14}/>
+                </button>
+            </div>
+        </div>
+    );
+};
+
 export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ isOpen, state, onConfirm, onCancel, addLog }) => {
-    const [manualOrderList, setManualOrderList] = useState<string[]>([]);
+    const [items, setItems] = useState<SortableOrderItemData[]>([]);
     const [charToAdd, setCharToAdd] = useState("");
 
     // Sync Manual List when modal opens
@@ -31,29 +111,42 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ isOpen, stat
             const envChars = locChars.filter(id => id.startsWith('env_'));
             const nonEnv = locChars.filter(id => !id.startsWith('env_'));
             
-            setManualOrderList([...nonEnv, ...envChars]);
+            const initialList = [...nonEnv, ...envChars];
+            setItems(initialList.map(charId => ({ uniqueId: generateId(), charId })));
         }
     }, [isOpen, state.map.activeLocationId, state.map.charPositions, state.characters]);
 
-    const moveOrderItem = (index: number, direction: -1 | 1) => {
-        const newList = [...manualOrderList];
-        const targetIndex = index + direction;
-        if (targetIndex < 0 || targetIndex >= newList.length) return;
-        const temp = newList[index];
-        newList[index] = newList[targetIndex];
-        newList[targetIndex] = temp;
-        setManualOrderList(newList);
+    const sensors = useSensors(
+        useSensor(PointerSensor, {
+            activationConstraint: {
+                distance: 8,
+            },
+        }),
+        useSensor(KeyboardSensor, {
+            coordinateGetter: sortableKeyboardCoordinates,
+        })
+    );
+
+    const handleDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event;
+        
+        if (over && active.id !== over.id) {
+            setItems((items) => {
+                const oldIndex = items.findIndex((item) => item.uniqueId === active.id);
+                const newIndex = items.findIndex((item) => item.uniqueId === over.id);
+                return arrayMove(items, oldIndex, newIndex);
+            });
+        }
     };
 
-    const removeOrderItem = (index: number) => {
-        const newList = [...manualOrderList];
-        newList.splice(index, 1);
-        setManualOrderList(newList);
+    const removeOrderItem = (uniqueId: string) => {
+        setItems(items => items.filter(i => i.uniqueId !== uniqueId));
     };
 
     const handleConfirm = () => {
-        onConfirm(manualOrderList);
-        addLog(`系统: 手动设定轮次顺序: [${manualOrderList.map(id => state.characters[id]?.name || id).join(', ')}]`);
+        const finalOrder = items.map(i => i.charId);
+        onConfirm(finalOrder);
+        addLog(`系统: 手动设定轮次顺序: [${finalOrder.map(id => state.characters[id]?.name || id).join(', ')}]`);
     };
 
     // Get available characters for manual add
@@ -86,23 +179,36 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ isOpen, stat
                     请调整本轮角色的行动顺序。您可以增加或删除任意角色（包括重复）。
                 </p>
                 
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1 mb-4 bg-surface-highlight/50 p-2 rounded border border-border custom-scrollbar">
-                    {manualOrderList.map((id, idx) => {
-                        const char = state.characters[id];
-                        if (!char) return null;
-                        return (
-                            <div key={`${id}_${idx}`} className="flex items-center bg-surface p-2 rounded border border-border gap-2 group hover:border-primary/50 transition-colors">
-                                <span className="text-muted font-mono w-6 text-center text-xs">{idx + 1}</span>
-                                <div className="flex-1 font-bold text-body text-sm truncate">{char.name}</div>
-                                <div className="flex gap-1 shrink-0 opacity-100 md:opacity-50 md:group-hover:opacity-100 transition-opacity">
-                                    <button onClick={() => moveOrderItem(idx, -1)} disabled={idx === 0} className="p-1 hover:bg-surface-highlight rounded text-muted disabled:opacity-20"><ArrowUp size={14}/></button>
-                                    <button onClick={() => moveOrderItem(idx, 1)} disabled={idx === manualOrderList.length - 1} className="p-1 hover:bg-surface-highlight rounded text-muted disabled:opacity-20"><ArrowDown size={14}/></button>
-                                    <button onClick={() => removeOrderItem(idx)} className="p-1 hover:bg-danger/20 rounded text-muted hover:text-danger-fg"><Trash2 size={14}/></button>
-                                </div>
-                            </div>
-                        )
-                    })}
-                    {manualOrderList.length === 0 && <div className="text-center text-muted italic py-4">列表为空</div>}
+                <div className="flex-1 overflow-y-auto pr-1 mb-4 bg-surface-highlight/50 p-2 rounded border border-border custom-scrollbar">
+                    {items.length === 0 ? (
+                        <div className="text-center text-muted italic py-4">列表为空</div>
+                    ) : (
+                        <DndContext 
+                            sensors={sensors}
+                            collisionDetection={closestCenter}
+                            onDragEnd={handleDragEnd}
+                            modifiers={[restrictToVerticalAxis]}
+                        >
+                            <SortableContext 
+                                items={items.map(i => i.uniqueId)}
+                                strategy={verticalListSortingStrategy}
+                            >
+                                {items.map((item, index) => {
+                                    const char = state.characters[item.charId];
+                                    if (!char) return null;
+                                    return (
+                                        <SortableOrderItem
+                                            key={item.uniqueId}
+                                            item={item}
+                                            index={index}
+                                            charName={char.name}
+                                            onRemove={removeOrderItem}
+                                        />
+                                    );
+                                })}
+                            </SortableContext>
+                        </DndContext>
+                    )}
                 </div>
 
                 <div className="flex gap-2 shrink-0 border-t border-border pt-4">
@@ -121,7 +227,7 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ isOpen, stat
                         disabled={!charToAdd}
                         onClick={() => {
                             if (charToAdd) {
-                                setManualOrderList([...manualOrderList, charToAdd]);
+                                setItems([...items, { uniqueId: generateId(), charId: charToAdd }]);
                                 setCharToAdd("");
                             }
                         }}

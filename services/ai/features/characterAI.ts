@@ -1,12 +1,12 @@
 
-import { AIConfig, AppSettings, DefaultSettings, LogEntry, GameState, Trigger, DebugLog, GameImage } from "../../../types";
+
+import { AIConfig, AppSettings, DefaultSettings, LogEntry, GameState, Trigger, DebugLog, GameImage, Character, MapRegion, Card, Effect, AttributeVisibility } from "../../../types";
 import { createClient, robustGenerate, supportsJsonMode } from "../core";
-import { buildContextMessages, fillPrompt, parsePromptStructure } from "../promptUtils";
-import { getGlobalMemory } from "../memoryUtils";
+import { buildContextMessages, parsePromptStructure } from "../promptUtils";
 import { evaluateTriggers } from "../../triggerService";
-import { formatRegionConflicts, formatLocationInfo } from "../../contextUtils";
 import { DEFAULT_AI_CONFIG } from "../../../config";
 import { ImageContextBuilder } from "../ImageContextBuilder";
+import { processMacros, MacroContext } from "../../macroService";
 
 export const generateCharacter = async (
     config: AIConfig,
@@ -29,64 +29,62 @@ export const generateCharacter = async (
     settingImages?: GameImage[]
 ): Promise<any> => {
     const finalConfig = config.provider ? config : DEFAULT_AI_CONFIG;
-    const client = createClient(finalConfig, appSettings.apiKeys);
+    const client = createClient(finalConfig, appSettings.apiKeys, appSettings.customEndpoints);
+    
+    // Resolve custom endpoint config if applicable
+    let customEndpointConfig = undefined;
+    if (finalConfig.provider === 'custom' && finalConfig.customEndpointId) {
+        customEndpointConfig = appSettings.customEndpoints.find(e => e.id === finalConfig.customEndpointId);
+    }
 
     // Initialize Image Builder for multimodal context
     const imageBuilder = new ImageContextBuilder();
-
-    const currentRound = history.length > 0 ? history[history.length - 1].round : 1;
-    // Pass imageBuilder to capture scene images
-    const historyStr = getGlobalMemory(history, currentRound, 10, appSettings.maxInputTokens, imageBuilder);
-
-    // Context Preparation
-    let regionConflicts = "(无区域数据)";
-    let locationContextStr = `位于 ${locationName}`;
-
-    if (fullGameState) {
-        const activeLocId = fullGameState.map.activeLocationId;
-        const regionId = activeLocId ? fullGameState.map.locations[activeLocId]?.regionId : undefined;
-        
-        regionConflicts = formatRegionConflicts(
-            activeLocId, 
-            regionId, 
-            fullGameState.characters, 
-            fullGameState.map.locations, 
-            fullGameState.map.charPositions
-        );
-
-        // Resolve rich location context (Description etc.)
-        let targetLoc = activeLocId ? fullGameState.map.locations[activeLocId] : undefined;
-        // If active location name doesn't match requested name, search for it
-        if (targetLoc?.name !== locationName) {
-            targetLoc = Object.values(fullGameState.map.locations).find(l => l.name === locationName);
-        }
-        if (targetLoc) {
-            locationContextStr = formatLocationInfo(targetLoc, imageBuilder);
-        }
-    }
 
     // Register provided images
     const appearanceRefStr = imageBuilder.registerList(appearanceImages, "外观参考图");
     const settingRefStr = imageBuilder.registerList(settingImages, "设定参考图");
 
-    let prompt = fillPrompt(defaultSettings.prompts.generateCharacter, {
-        DESC: desc + appearanceRefStr + settingRefStr,
-        STYLE: style,
-        LOCATION_NAME: locationName,
-        REGION_NAME: regionName,
-        LOCATION_CONTEXT: locationContextStr,
-        EXISTING_CHARS: existingChars || "无",
-        SHORT_HISTORY: historyStr,
-        SUGGESTED_NAMES: suggestedNames.join(", "),
-        CHAR_TEMPLATE: JSON.stringify(defaultSettings.templates.character, null, 2),
-        REGION_CONFLICT: regionConflicts,
-        WORLD_GUIDANCE: worldGuidance || ""
-    }, appSettings);
+    // Construct Macro Context
+    // We need a GameState. If fullGameState is missing (unlikely in normal flow), we might need a mock.
+    // For now, we assume fullGameState is provided or valid enough.
+    // If not, macroService might crash on property access.
+    
+    // Fallback Mock State if needed (Safety)
+    const safeGameState = fullGameState || {
+        world: { attributes: {}, history: history, worldGuidance: worldGuidance || "" },
+        map: { locations: {}, regions: {}, charPositions: {}, activeLocationId: "" },
+        characters: {},
+        round: { roundNumber: 1, activeCharId: "" },
+        appSettings: appSettings,
+        defaultSettings: defaultSettings,
+        cardPool: []
+    } as unknown as GameState;
+
+    const ctx: MacroContext = {
+        gameState: safeGameState,
+        imageBuilder: imageBuilder,
+        aiConfig: finalConfig,
+        onDebug: onDebug,
+        dynamicParams: {
+             desc: desc + appearanceRefStr + settingRefStr,
+             style: style, // Used to guide skill generation, but not stored in Char object anymore
+             locationName: locationName,
+             regionName: regionName,
+             // Note: REGION_DESC logic is handled inside MacroService if available in map, 
+             // but here we might not have the region in map yet if it's new.
+             // MacroService doesn't accept raw regionDesc as param, so we might need to rely on map state or add it.
+             // Actually MacroService's REGION_DESC falls back to dynamicParams.regionDesc.
+             existingCharsContext: existingChars,
+             suggestedNames: suggestedNames
+        }
+    };
+
+    let prompt = processMacros(defaultSettings.prompts.generateCharacter, ctx);
 
     if (fullGameState) {
         const { promptSuffix, logs } = evaluateTriggers(fullGameState, 'generateCharacter', onTriggerUpdate);
         prompt += promptSuffix;
-        if (logs.length > 0 && onLog) logs.forEach(onLog);
+        if (logs.length > 0 && onLog) logs.forEach(log => onLog(log.content));
     }
 
     const promptParts = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
@@ -97,16 +95,14 @@ export const generateCharacter = async (
         () => client.models.generateContent({
             model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
             contents: messages,
-            // Optimization: Enable JSON mode for compatible providers
             config: { 
-                responseMimeType: supportsJsonMode(finalConfig.provider) ? 'application/json' : undefined,
+                responseMimeType: supportsJsonMode(finalConfig.provider, customEndpointConfig) ? 'application/json' : undefined,
                 maxOutputTokens: appSettings.maxOutputTokens
             }
         }),
         (json) => json && (json.name || json.description),
         3,
         (error, rawResponse) => {
-            // Failure Callback
             if (onDebug) {
                 onDebug({
                     id: `debug_char_gen_fail_${Date.now()}`,
@@ -116,18 +112,19 @@ export const generateCharacter = async (
                     response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
                 });
             }
+        },
+        (rawResponse) => {
+            if (onDebug) {
+                onDebug({
+                    id: `debug_char_gen_${Date.now()}`,
+                    timestamp: Date.now(),
+                    characterName: "System (Char Gen)",
+                    prompt: JSON.stringify(messages, null, 2),
+                    response: JSON.stringify(rawResponse, null, 2)
+                });
+            }
         }
     );
-
-    if (onDebug && result) {
-        onDebug({
-            id: `debug_char_gen_${Date.now()}`,
-            timestamp: Date.now(),
-            characterName: "System (Char Gen)",
-            prompt: JSON.stringify(messages, null, 2),
-            response: JSON.stringify(result, null, 2)
-        });
-    }
 
     return result;
 };

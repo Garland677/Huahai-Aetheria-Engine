@@ -1,30 +1,15 @@
 
-import { AIConfig, Character, LogEntry, GameAttribute, Card, MapLocation, MapRegion, PrizePool, TurnAction, AppSettings, DefaultSettings, GameState, Trigger, DebugLog } from "../../../types";
+
+import { AIConfig, Character, LogEntry, GameAttribute, Card, MapLocation, MapRegion, PrizePool, TurnAction, AppSettings, DefaultSettings, GameState, Trigger, DebugLog, Secret, TriggerEffect } from "../../../types";
 import { createClient, robustGenerate, supportsJsonMode, dispatchAIStatus } from "../core";
-import { buildContextMessages, fillPrompt, getPleasureInstruction, parsePromptStructure } from "../promptUtils";
-import { getCharacterMemory } from "../memoryUtils";
+import { buildContextMessages, parsePromptStructure } from "../promptUtils";
 import { evaluateTriggers } from "../../triggerService";
 import { DEFAULT_AI_CONFIG } from "../../../config";
-import { 
-    formatCharacterPersona, formatLocationInfo, formatKnownRegions, 
-    formatOtherCharacters, formatSelfDetailed, formatPrizePools,
-    filterWorldAttributes, formatRegionConflicts
-} from "../../contextUtils";
+import { processMacros, MacroContext } from "../../macroService";
 import { ImageContextBuilder } from "../ImageContextBuilder";
-import { getNaturalTimeDelta } from "../../timeUtils";
 
 // Helper to extract JSON-like string content from partial stream buffer
-// Matches "narrative": "..." or "speech": "..." even if broken
 const extractStreamContent = (buffer: string, key: 'narrative' | 'speech'): string => {
-    // Regex explanation:
-    // Match "key": "
-    // Capture content until:
-    // 1. Unescaped quote (") -> End of string
-    // 2. End of buffer ($) -> Stream incomplete
-    // Non-greedy capture via [^"\\]* with escape handling is complex in partial state.
-    // Simpler approach for stream: Match from start quote until we hit an unescaped quote OR EOF.
-    
-    // Find key start position
     const keyRegex = new RegExp(`"${key}"\\s*:\\s*"`);
     const match = keyRegex.exec(buffer);
     if (!match) return "";
@@ -36,88 +21,55 @@ const extractStreamContent = (buffer: string, key: 'narrative' | 'speech'): stri
     for (let i = startIdx; i < buffer.length; i++) {
         const char = buffer[i];
         if (isEscaped) {
-            content += char;
+            switch (char) {
+                case 'n': content += '\n'; break;
+                case 'r': content += '\r'; break;
+                case 't': content += '\t'; break;
+                case 'b': content += '\b'; break;
+                case 'f': content += '\f'; break;
+                case '"': content += '"'; break;
+                case '\\': content += '\\'; break;
+                case '/': content += '/'; break;
+                case 'u':
+                    if (i + 4 < buffer.length) {
+                        const hex = buffer.substring(i + 1, i + 5);
+                        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                            content += String.fromCharCode(parseInt(hex, 16));
+                            i += 4;
+                        } else {
+                            content += 'u';
+                        }
+                    } else {
+                        content += 'u';
+                    }
+                    break;
+                default:
+                    content += char;
+            }
             isEscaped = false;
         } else {
             if (char === '\\') {
                 isEscaped = true;
             } else if (char === '"') {
-                // End of string found
                 break;
             } else {
                 content += char;
             }
         }
     }
-    
-    // Basic cleanup of JSON escapes for display (e.g. \n -> newline)
-    return content.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-};
-
-// --- NEW HELPER: Calculate Last Present Time ---
-const calculateLastPresentTime = (charId: string, history: LogEntry[], currentWorldTimeStr: string): string => {
-    let actionIndex = -1;
-    
-    // 1. Find last action index (Reverse search)
-    // We look for where the character ACTED or REACTED (actingCharId matches)
-    for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i].actingCharId === charId) {
-            actionIndex = i;
-            break;
-        }
-    }
-
-    // If character never acted, assume "First Appearance" logic
-    if (actionIndex === -1) return "很长时间";
-
-    let foundTimeStr = "";
-    
-    // Regex: Robustly find the time pattern "YYYY年MM月DD日..."
-    // We do NOT rely on the comma separator or "当前故事时间：" label prefix strictly capturing the group.
-    // Instead, we scan the whole line for a valid date string.
-    // Matches: 2077年1月1日 or 2077年01月01日08时00分
-    const timeRegex = /(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日(?:\s*\d{1,2}\s*时\s*\d{1,2}\s*分)?)/;
-
-    // 2. Strategy A: Find SUBSEQUENT world time log (Forward search from actionIndex)
-    // This represents time *after* action completed.
-    for (let i = actionIndex; i < history.length; i++) {
-         const match = history[i].content.match(timeRegex);
-         if (match) {
-             foundTimeStr = match[1];
-             break;
-         }
-    }
-
-    // 3. Strategy B: If no subsequent log, Find PRECEDING world time log (Backward search)
-    // This represents time *before* action started. Approximate "action time" to this.
-    if (!foundTimeStr) {
-        for (let i = actionIndex; i >= 0; i--) {
-             const match = history[i].content.match(timeRegex);
-             if (match) {
-                 foundTimeStr = match[1];
-                 break;
-             }
-        }
-    }
-
-    // If still no time log found, assume "Just now" (Start of world)
-    if (!foundTimeStr) return "片刻";
-
-    return getNaturalTimeDelta(currentWorldTimeStr, foundTimeStr);
+    return content;
 };
 
 export const determineCharacterAction = async (
     char: Character,
     history: LogEntry[],
     worldAttributes: Record<string, GameAttribute>,
-    otherChars: Character[],
     globalContextConfig: any,
     cardPool: Card[],
     appSettings: AppSettings,
     defaultSettings: DefaultSettings,
     worldGuidance?: string,
     currentLocation?: MapLocation,
-    nearbyContext?: string,
     knownRegions?: Record<string, MapRegion>,
     prizePools?: Record<string, PrizePool>,
     allLocations?: Record<string, MapLocation>,
@@ -125,24 +77,26 @@ export const determineCharacterAction = async (
     fullGameState?: GameState,
     onLog?: (msg: string) => void,
     onTriggerUpdate?: (id: string, updates: Partial<Trigger>) => void,
-    onStream?: (text: string) => void // New Streaming Callback
+    onStream?: (text: string) => void,
+    shouldAbort?: () => boolean,
+    onEffects?: (effects: TriggerEffect[]) => void // New callback for trigger effects
 ): Promise<TurnAction> => {
     // Priority: Char Override > Global Behavior Config > Global Judge Config > Default
-    // Use Override Flag
     const finalConfig = (char.useAiOverride && char.aiConfig?.provider)
         ? char.aiConfig 
         : (fullGameState?.charBehaviorConfig || fullGameState?.judgeConfig || DEFAULT_AI_CONFIG);
         
-    const client = createClient(finalConfig, appSettings.apiKeys);
-
-    // Initialize Image Context Builder
+    const client = createClient(finalConfig, appSettings.apiKeys, appSettings.customEndpoints);
+    
+    // Resolve custom endpoint config if applicable
+    let customEndpointConfig = undefined;
+    if (finalConfig.provider === 'custom' && finalConfig.customEndpointId) {
+        customEndpointConfig = appSettings.customEndpoints.find(e => e.id === finalConfig.customEndpointId);
+    }
+    
     const imageBuilder = new ImageContextBuilder();
 
-    // Filter pools at current location
-    const locationId = fullGameState?.map.charPositions[char.id]?.locationId;
-    const poolsStr = formatPrizePools(prizePools, locationId, allLocations);
-
-    // --- Action Memory Logic (Updated for Overrides & Env) ---
+    // --- Action Memory Logic (Dropout) ---
     const isEnv = char.id.startsWith('env_');
     
     // 1. Determine Capacity
@@ -150,7 +104,7 @@ export const determineCharacterAction = async (
     if (char.memoryConfig?.useOverride) {
         capacity = char.memoryConfig.maxMemoryRounds;
     } else if (isEnv) {
-        capacity = appSettings.maxEnvMemoryRounds ?? 5; // Default 5 for env if setting missing
+        capacity = appSettings.maxEnvMemoryRounds ?? 5; 
     }
 
     // 2. Determine Dropout Rate
@@ -162,186 +116,198 @@ export const determineCharacterAction = async (
     
     // 3. Apply Dropout
     if (Math.random() < dropoutProb) {
-        effectiveMemoryRounds = 4; // Force short memory (4 rounds) for Action
+        effectiveMemoryRounds = 4; // Force short memory
         if (onDebug) {
             onDebug({
                 id: `debug_dropout_act_${char.name}_${Date.now()}`,
                 timestamp: Date.now(),
                 characterName: "System (Action Dropout)",
                 prompt: "Action Memory Dropout Triggered",
-                response: `Memory reduced from ${capacity} to ${effectiveMemoryRounds} rounds to prevent repetition loop.`
+                response: `Memory reduced from ${capacity} to ${effectiveMemoryRounds} rounds.`
             });
         }
     }
     // -----------------------------------
-
-    // Get Filtered Character Memory
-    const memoryStr = getCharacterMemory(
-        history, 
-        char.id, 
-        locationId, 
-        effectiveMemoryRounds, // Use effective rounds
-        imageBuilder, 
-        appSettings.maxInputTokens,
-        fullGameState?.characters, // Pass Chars Map
-        fullGameState?.map.locations // Pass Locs Map
-    );
-
-    // Calculate Pleasure Instruction
-    const pleasureInstruction = getPleasureInstruction(char);
-
-    // Calculate Region Conflicts
-    let regionConflicts = "(无区域数据)";
-    if (fullGameState) {
-        const regionId = locationId ? fullGameState.map.locations[locationId]?.regionId : undefined;
-        regionConflicts = formatRegionConflicts(
-            locationId,
-            regionId,
-            fullGameState.characters,
-            fullGameState.map.locations,
-            fullGameState.map.charPositions
-        );
-    }
     
-    // Calculate Time Span
-    const currentTimeStr = String(worldAttributes['worldTime']?.value || "2077:01:01:00:00:00");
-    const lastPresentTime = calculateLastPresentTime(char.id, history, currentTimeStr);
-
-    let prompt = fillPrompt(defaultSettings.prompts.determineCharacterAction, {
-        WORLD_STATE: JSON.stringify(filterWorldAttributes(worldAttributes), null, 2),
-        SELF_CONTEXT: formatSelfDetailed(char, cardPool, locationId, imageBuilder),
-        LOCATION_CONTEXT: formatLocationInfo(currentLocation, imageBuilder),
-        KNOWN_REGIONS: formatKnownRegions(knownRegions),
-        NEARBY_CONTEXT: nearbyContext || "未知",
-        OTHERS_CONTEXT: formatOtherCharacters(char.id, otherChars, locationId, cardPool, imageBuilder),
-        HISTORY_CONTEXT: memoryStr,
-        SPECIFIC_CONTEXT: formatCharacterPersona(char, imageBuilder),
-        SHOP_CONTEXT: "（此处可列出商店物品，暂略）", 
-        PRIZE_POOLS: poolsStr,
-        COST: String(defaultSettings.gameplay.defaultCreationCost),
-        PLEASURE_GOAL: pleasureInstruction,
-        REGION_CONFLICT: regionConflicts,
-        WORLD_GUIDANCE: worldGuidance || "",
-        SPEECH_STYLE: char.style || "（未定义风格）",
-        LAST_PRESENT_TIME: lastPresentTime // Inject Time Span
-    }, appSettings);
-
-    if (fullGameState) {
-        const { promptSuffix, logs } = evaluateTriggers(fullGameState, 'determineCharacterAction', onTriggerUpdate, char.id);
-        prompt += promptSuffix;
-        if (logs.length > 0 && onLog) logs.forEach(onLog);
+    // Apply Context Window Override from Custom Endpoint if available
+    let tokenLimit = appSettings.maxInputTokens;
+    if (customEndpointConfig && customEndpointConfig.contextWindow) {
+        tokenLimit = customEndpointConfig.contextWindow;
     }
 
-    // Use Parser to handle <user>/<assistant> tags and interleave images via callback
-    const promptMessages = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
+    // Construct Macro Context
+    const gameStateForMacro = fullGameState || {
+        world: { attributes: worldAttributes, history: history, worldGuidance: worldGuidance || "" },
+        map: { 
+            locations: allLocations || {}, 
+            regions: knownRegions || {}, 
+            charPositions: {}, 
+            activeLocationId: currentLocation?.id || "" 
+        },
+        characters: { [char.id]: char }, // Minimal
+        round: { roundNumber: 1, activeCharId: char.id },
+        appSettings: { ...appSettings, maxInputTokens: tokenLimit }, // Use local overridden limit
+        defaultSettings: defaultSettings,
+        cardPool: cardPool,
+        prizePools: prizePools || {}
+    } as unknown as GameState;
 
-    const messages = buildContextMessages(globalContextConfig, finalConfig.contextConfig, char.contextConfig, promptMessages, appSettings);
-    
-    // Create Request ID for Visualizer
-    const requestId = `act_${char.id}_${Date.now()}`;
-
-    const genConfig = {
-        responseMimeType: supportsJsonMode(finalConfig.provider) ? 'application/json' : undefined,
-        maxOutputTokens: appSettings.maxOutputTokens
+    const ctx: MacroContext = {
+        gameState: gameStateForMacro,
+        activeCharId: char.id,
+        activeLocationId: currentLocation?.id,
+        imageBuilder: imageBuilder,
+        aiConfig: finalConfig,
+        onDebug: onDebug,
+        dynamicParams: {
+            memoryRounds: effectiveMemoryRounds,
+            // Inject streaming flag to help Time Utils ignore the current placeholder
+            isStreaming: appSettings.enableStreaming !== false
+        }
     };
 
-    // STREAMING LOGIC
-    if (appSettings.enableStreaming !== false && client.models.generateContentStream && onStream) {
-        try {
-            dispatchAIStatus(requestId, 'blue'); // Visualizer Start (Processing)
+    const promptTemplate = isEnv 
+        ? defaultSettings.prompts.determineEnvAction 
+        : (char.isProfessional 
+            ? defaultSettings.prompts.determineCharacterActionPro 
+            : defaultSettings.prompts.determineCharacterAction);
 
-            const stream = await client.models.generateContentStream({
+    // --- TRIGGER EVALUATION ---
+    if (fullGameState) {
+        // 1. Evaluate Triggers
+        const { promptSuffix, guidanceSuffix, logs, effects } = evaluateTriggers(fullGameState, 'determineCharacterAction', onTriggerUpdate, char.id);
+        
+        // 2. Inject Guidance into Macro Context (Non-Urgent)
+        if (guidanceSuffix) {
+            ctx.dynamicParams = { ...ctx.dynamicParams, triggerGuidance: guidanceSuffix };
+        }
+
+        // 3. Process Prompt (This resolves WORLD_GUIDANCE with injected guidance)
+        let prompt = processMacros(promptTemplate, ctx);
+        
+        // 4. Append Prompt Suffix (Urgent)
+        prompt += promptSuffix;
+        
+        // 5. Handle Logs and Effects
+        if (logs.length > 0 && onLog) logs.forEach(log => onLog(log.content));
+        if (effects.length > 0 && onEffects) onEffects(effects); // Execute effects
+
+        // Continue to API call...
+        const promptMessages = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
+        const messages = buildContextMessages(globalContextConfig, finalConfig.contextConfig, char.contextConfig, promptMessages, appSettings);
+        
+        // ... (Rest of existing AI call logic)
+        const requestId = `act_${char.id}_${Date.now()}`;
+        const genConfig = {
+            responseMimeType: supportsJsonMode(finalConfig.provider, customEndpointConfig) ? 'application/json' : undefined,
+            maxOutputTokens: appSettings.maxOutputTokens
+        };
+
+        // STREAMING LOGIC
+        if (appSettings.enableStreaming !== false && client.models.generateContentStream && onStream) {
+            try {
+                dispatchAIStatus(requestId, 'blue'); 
+                const stream = await client.models.generateContentStream({
+                    model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
+                    contents: messages,
+                    config: genConfig
+                });
+
+                let fullBuffer = "";
+                let currentNarrative = "";
+                let currentSpeech = "";
+
+                for await (const chunk of stream) {
+                    if (shouldAbort && shouldAbort()) {
+                        break;
+                    }
+                    
+                    if (chunk.text) {
+                        fullBuffer += chunk.text;
+                        const newNarrative = extractStreamContent(fullBuffer, 'narrative');
+                        const newSpeech = extractStreamContent(fullBuffer, 'speech');
+                        
+                        if (newNarrative !== currentNarrative || newSpeech !== currentSpeech) {
+                            currentNarrative = newNarrative;
+                            currentSpeech = newSpeech;
+                            
+                            const narrativeHtml = currentNarrative.replace(/\n+/g, '<br/>');
+                            const speechHtml = currentSpeech.replace(/\n+/g, '<br/>');
+
+                            let display = "";
+                            if (narrativeHtml) display += `<span class="italic">* ${narrativeHtml} *</span>`;
+                            if (speechHtml) display += (display ? "<br/>" : "") + `${speechHtml}`;
+                            
+                            onStream(display);
+                        }
+                    }
+                }
+                
+                if (shouldAbort && shouldAbort()) {
+                    dispatchAIStatus(requestId, 'gray');
+                    return { narrative: "", speech: "", commands: [] };
+                }
+
+                let cleanText = fullBuffer.replace(/```json/g, '').replace(/```/g, '').trim();
+                const json = JSON.parse(cleanText);
+
+                if (onDebug) {
+                    onDebug({
+                        id: `debug_act_stream_${char.name}_${Date.now()}`,
+                        timestamp: Date.now(),
+                        characterName: char.name,
+                        prompt: JSON.stringify(messages, null, 2),
+                        response: fullBuffer
+                    });
+                }
+                dispatchAIStatus(requestId, 'green'); 
+                return json as TurnAction;
+
+            } catch (e: any) {
+                console.warn("Stream/Parse failed:", e);
+                dispatchAIStatus(requestId, 'gray');
+                return { narrative: "", speech: "", commands: [] };
+            }
+        }
+
+        // NON-STREAMING
+        const result = await robustGenerate<TurnAction>(
+            () => client.models.generateContent({
                 model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
                 contents: messages,
                 config: genConfig
-            });
-
-            let fullBuffer = "";
-            let currentNarrative = "";
-            let currentSpeech = "";
-
-            for await (const chunk of stream) {
-                if (chunk.text) {
-                    fullBuffer += chunk.text;
-                    
-                    // Attempt extraction
-                    const newNarrative = extractStreamContent(fullBuffer, 'narrative');
-                    const newSpeech = extractStreamContent(fullBuffer, 'speech');
-                    
-                    if (newNarrative !== currentNarrative || newSpeech !== currentSpeech) {
-                        currentNarrative = newNarrative;
-                        currentSpeech = newSpeech;
-                        
-                        let display = "";
-                        if (currentNarrative) display += `<span class="italic">* ${currentNarrative} *</span>`;
-                        // Remove quotes around speech
-                        if (currentSpeech) display += (display ? "<br/>" : "") + `${currentSpeech}`;
-                        
-                        onStream(display);
-                    }
+            }),
+            (json) => json && (json.narrative || json.speech || json.commands),
+            3,
+            (error, rawResponse) => {
+                if (onDebug) {
+                    onDebug({
+                        id: `debug_act_fail_${char.name}_${Date.now()}`,
+                        timestamp: Date.now(),
+                        characterName: `${char.name} (Failed)`,
+                        prompt: JSON.stringify(messages, null, 2),
+                        response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
+                    });
+                }
+            },
+            (rawResponse) => {
+                if (onDebug) {
+                    onDebug({
+                        id: `debug_act_${char.name}_${Date.now()}`,
+                        timestamp: Date.now(),
+                        characterName: char.name,
+                        prompt: JSON.stringify(messages, null, 2),
+                        response: JSON.stringify(rawResponse, null, 2)
+                    });
                 }
             }
+        );
 
-            // Stream finished, parse final JSON
-            let cleanText = fullBuffer.replace(/```json/g, '').replace(/```/g, '').trim();
-            const json = JSON.parse(cleanText);
-
-            if (onDebug) {
-                onDebug({
-                    id: `debug_act_stream_${char.name}_${Date.now()}`,
-                    timestamp: Date.now(),
-                    characterName: char.name,
-                    prompt: JSON.stringify(messages, null, 2),
-                    response: fullBuffer
-                });
-            }
-
-            dispatchAIStatus(requestId, 'green'); // Visualizer Success
-            return json as TurnAction;
-
-        } catch (e: any) {
-            console.warn("Stream/Parse failed, falling back or returning partial state:", e);
-            dispatchAIStatus(requestId, 'gray'); // Visualizer Fail
-            
-            // If we have some content, try to salvage it manually into a TurnAction
-            return { narrative: "", speech: "", commands: [] };
-        }
+        return result || { narrative: "...", commands: [] };
     }
-
-    // FALLBACK TO NON-STREAMING
-    const result = await robustGenerate<TurnAction>(
-        () => client.models.generateContent({
-            model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
-            contents: messages,
-            config: genConfig
-        }),
-        (json) => json && (json.narrative || json.speech || json.commands),
-        3,
-        (error, rawResponse) => {
-            // Failure Callback
-            if (onDebug) {
-                onDebug({
-                    id: `debug_act_fail_${char.name}_${Date.now()}`,
-                    timestamp: Date.now(),
-                    characterName: `${char.name} (Failed)`,
-                    prompt: JSON.stringify(messages, null, 2),
-                    response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
-                });
-            }
-        }
-    );
-
-    if (onDebug && result) {
-        onDebug({
-            id: `debug_act_${char.name}_${Date.now()}`,
-            timestamp: Date.now(),
-            characterName: char.name,
-            prompt: JSON.stringify(messages, null, 2),
-            response: JSON.stringify(result, null, 2)
-        });
-    }
-
-    return result || { narrative: "...", commands: [] };
+    
+    // Fallback if no fullGameState (should not happen in real execution)
+    return { narrative: "...", commands: [] };
 };
 
 export const determineCharacterReaction = async (
@@ -360,198 +326,241 @@ export const determineCharacterReaction = async (
     fullGameState?: GameState,
     onLog?: (msg: string) => void,
     onTriggerUpdate?: (id: string, updates: Partial<Trigger>) => void,
-    onStream?: (text: string) => void // New Streaming Callback
-): Promise<string> => {
+    onStream?: (text: string) => void,
+    shouldAbort?: () => boolean,
+    onEffects?: (effects: TriggerEffect[]) => void // New callback
+): Promise<{ speech: string, generatedSecrets?: Secret[] }> => {
     // Priority: Char Override > Global Behavior Config > Global Judge Config > Default
     const finalConfig = (char.useAiOverride && char.aiConfig?.provider)
         ? char.aiConfig 
         : (fullGameState?.charBehaviorConfig || fullGameState?.judgeConfig || DEFAULT_AI_CONFIG);
         
-    const client = createClient(finalConfig, appSettings.apiKeys);
+    const client = createClient(finalConfig, appSettings.apiKeys, appSettings.customEndpoints);
+    
+    // Resolve custom endpoint config if applicable
+    let customEndpointConfig = undefined;
+    if (finalConfig.provider === 'custom' && finalConfig.customEndpointId) {
+        customEndpointConfig = appSettings.customEndpoints.find(e => e.id === finalConfig.customEndpointId);
+    }
 
-    // Initialize Image Context Builder
     const imageBuilder = new ImageContextBuilder();
 
-    // --- Reaction Memory Logic (Updated for Overrides & Env) ---
+    // --- Reaction Memory Logic (Dropout) ---
     const isEnv = char.id.startsWith('env_');
-    
-    // 1. Determine Capacity
-    let capacity = memoryRounds; // Default passed in (usually from appSettings)
+    let capacity = memoryRounds;
     if (char.memoryConfig?.useOverride) {
         capacity = char.memoryConfig.maxMemoryRounds;
     } else if (isEnv) {
         capacity = appSettings.maxEnvMemoryRounds ?? 5;
     }
 
-    // 2. Determine Dropout Rate
     const dropoutProb = char.memoryConfig?.useOverride 
         ? (char.memoryConfig.reactionDropoutProbability ?? 0.34)
         : (appSettings.reactionMemoryDropoutProbability ?? 0.34);
     
     let effectiveMemoryRounds = capacity;
 
-    // 3. Apply Dropout
     if (Math.random() < dropoutProb) {
-        effectiveMemoryRounds = 2; // Force short memory (2 rounds) for Reaction
+        effectiveMemoryRounds = 2; // Force short memory
         if (onDebug) {
             onDebug({
                 id: `debug_dropout_react_${char.name}_${Date.now()}`,
                 timestamp: Date.now(),
                 characterName: "System (Reaction Dropout)",
                 prompt: "Reaction Memory Dropout Triggered",
-                response: `Memory reduced from ${capacity} to ${effectiveMemoryRounds} rounds to prevent repetition.`
+                response: `Memory reduced from ${capacity} to ${effectiveMemoryRounds} rounds.`
             });
         }
     }
-    // ----------------------------
-
-    const memoryStr = getCharacterMemory(
-        history, 
-        char.id, 
-        locationId, 
-        effectiveMemoryRounds, // Use effective rounds
-        imageBuilder, 
-        appSettings.maxInputTokens,
-        fullGameState?.characters, // Pass Maps
-        fullGameState?.map.locations
-    );
-    const othersStr = otherChars ? formatOtherCharacters(char.id, otherChars, locationId, cardPool, imageBuilder) : "无";
     
-    // Calculate Pleasure Instruction
-    const pleasureInstruction = getPleasureInstruction(char);
+    // Apply Context Window Override from Custom Endpoint
+    let tokenLimit = appSettings.maxInputTokens;
+    if (customEndpointConfig && customEndpointConfig.contextWindow) {
+        tokenLimit = customEndpointConfig.contextWindow;
+    }
 
     // Inject Images for Reaction Trigger if available in the last log
     let enhancedTriggerEvent = triggerEvent;
     const lastLog = history[history.length - 1];
     if (lastLog && lastLog.images && lastLog.images.length > 0) {
-         // If trigger event matches last log, append images inline
          if (triggerEvent.includes(lastLog.content) || lastLog.content.includes(triggerEvent)) {
              enhancedTriggerEvent = imageBuilder.registerAndAppend(enhancedTriggerEvent, lastLog.images, "附件");
          }
     }
     
-    // Extract Guidance
-    const worldGuidance = fullGameState?.world?.worldGuidance || "";
+    const gameStateForMacro = fullGameState || {
+        world: { attributes: worldAttributes, history: history, worldGuidance: "" },
+        map: { locations: {}, regions: {}, charPositions: {} },
+        characters: { [char.id]: char },
+        round: { roundNumber: 1, activeCharId: char.id },
+        appSettings: { ...appSettings, maxInputTokens: tokenLimit },
+        defaultSettings: defaultSettings,
+        cardPool: cardPool || []
+    } as unknown as GameState;
 
-    // Calculate Time Span
-    const currentTimeStr = String(worldAttributes['worldTime']?.value || "2077:01:01:00:00:00");
-    const lastPresentTime = calculateLastPresentTime(char.id, history, currentTimeStr);
-
-    let prompt = fillPrompt(defaultSettings.prompts.determineCharacterReaction, {
-        CHAR_NAME: char.name,
-        CHAR_ID: char.id,
-        CHAR_DESC: char.description,
-        SPECIFIC_CONTEXT: formatCharacterPersona(char, imageBuilder),
-        PLEASURE_GOAL: pleasureInstruction,
-        WORLD_STATE: JSON.stringify(filterWorldAttributes(worldAttributes), null, 2),
-        OTHERS_CONTEXT: othersStr,
-        RECENT_HISTORY: memoryStr, // Use filtered memory with images
-        TRIGGER_EVENT: enhancedTriggerEvent,
-        WORLD_GUIDANCE: worldGuidance,
-        SPEECH_STYLE: char.style || "（未定义风格）",
-        LAST_PRESENT_TIME: lastPresentTime // Inject Time Span
-    }, appSettings);
-
-    if (fullGameState) {
-        const { promptSuffix, logs } = evaluateTriggers(fullGameState, 'determineCharacterReaction', onTriggerUpdate, char.id);
-        prompt += promptSuffix;
-        if (logs.length > 0 && onLog) logs.forEach(onLog);
-    }
-
-    // Use Parser for reaction as well
-    const promptMessages = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
-
-    const messages = buildContextMessages(globalContextConfig || { messages: [] }, finalConfig.contextConfig, char.contextConfig, promptMessages, appSettings);
-
-    // Create Request ID for Visualizer
-    const requestId = `react_${char.id}_${Date.now()}`;
-
-    const genConfig = {
-        responseMimeType: supportsJsonMode(finalConfig.provider) ? 'application/json' : undefined,
-        maxOutputTokens: appSettings.maxOutputTokens
+    const ctx: MacroContext = {
+        gameState: gameStateForMacro,
+        activeCharId: char.id,
+        activeLocationId: locationId,
+        imageBuilder: imageBuilder,
+        aiConfig: finalConfig,
+        onDebug: onDebug,
+        dynamicParams: {
+            memoryRounds: effectiveMemoryRounds,
+            triggerEvent: enhancedTriggerEvent,
+            othersContext: otherChars ? undefined : "无",
+            // Inject streaming flag for reaction as well, though usually reactions don't advance world time much
+            isStreaming: appSettings.enableStreaming !== false
+        }
     };
 
-    // STREAMING LOGIC
-    if (appSettings.enableStreaming !== false && client.models.generateContentStream && onStream) {
-        try {
-            dispatchAIStatus(requestId, 'blue'); // Visualizer Start (Processing)
+    const promptTemplate = isEnv
+        ? defaultSettings.prompts.determineEnvReaction
+        : (char.isProfessional 
+            ? defaultSettings.prompts.determineCharacterReactionPro 
+            : defaultSettings.prompts.determineCharacterReaction);
 
-            const stream = await client.models.generateContentStream({
+    // --- TRIGGER EVALUATION ---
+    if (fullGameState) {
+        // 1. Evaluate
+        const { promptSuffix, guidanceSuffix, logs, effects } = evaluateTriggers(fullGameState, 'determineCharacterReaction', onTriggerUpdate, char.id);
+        
+        // 2. Inject Guidance
+        if (guidanceSuffix) {
+             ctx.dynamicParams = { ...ctx.dynamicParams, triggerGuidance: guidanceSuffix };
+        }
+        
+        // 3. Process Prompt
+        let prompt = processMacros(promptTemplate, ctx);
+        
+        // 4. Append Urgent Suffix
+        prompt += promptSuffix;
+        
+        // 5. Handle outputs
+        if (logs.length > 0 && onLog) logs.forEach(log => onLog(log.content));
+        if (effects.length > 0 && onEffects) onEffects(effects); // Execute effects
+
+        // Continue...
+        const promptMessages = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
+        const messages = buildContextMessages(globalContextConfig || { messages: [] }, finalConfig.contextConfig, char.contextConfig, promptMessages, appSettings);
+        const requestId = `react_${char.id}_${Date.now()}`;
+        const genConfig = {
+            responseMimeType: supportsJsonMode(finalConfig.provider, customEndpointConfig) ? 'application/json' : undefined,
+            maxOutputTokens: appSettings.maxOutputTokens
+        };
+
+        if (appSettings.enableStreaming !== false && client.models.generateContentStream && onStream) {
+            try {
+                dispatchAIStatus(requestId, 'blue');
+                const stream = await client.models.generateContentStream({
+                    model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
+                    contents: messages,
+                    config: genConfig
+                });
+
+                let fullBuffer = "";
+                let currentSpeech = "";
+
+                for await (const chunk of stream) {
+                    if (shouldAbort && shouldAbort()) {
+                        break;
+                    }
+                    
+                    if (chunk.text) {
+                        fullBuffer += chunk.text;
+                        const newSpeech = extractStreamContent(fullBuffer, 'speech');
+                        if (newSpeech !== currentSpeech) {
+                            currentSpeech = newSpeech;
+                            onStream(`${currentSpeech.replace(/\n+/g, '<br/>')}`);
+                        }
+                    }
+                }
+
+                if (shouldAbort && shouldAbort()) {
+                    dispatchAIStatus(requestId, 'gray');
+                    return { speech: "" };
+                }
+
+                let cleanText = fullBuffer.replace(/```json/g, '').replace(/```/g, '').trim();
+                const json = JSON.parse(cleanText);
+
+                if (onDebug) {
+                    onDebug({
+                        id: `debug_react_stream_${char.name}_${Date.now()}`,
+                        timestamp: Date.now(),
+                        characterName: char.name,
+                        prompt: JSON.stringify(messages, null, 2),
+                        response: fullBuffer
+                    });
+                }
+
+                dispatchAIStatus(requestId, 'green'); 
+                const rawSecrets = Array.isArray(json.generatedSecrets) ? json.generatedSecrets : [];
+                const mappedSecrets: Secret[] = rawSecrets.map((s: any) => ({
+                    id: `sec_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    question: s.question,
+                    correctAnswer: s.correctAnswer,
+                    wrongAnswerA: s.wrongAnswerA,
+                    wrongAnswerB: s.wrongAnswerB,
+                    solved: false
+                }));
+                return { speech: json.speech || "", generatedSecrets: mappedSecrets };
+
+            } catch (e: any) {
+                console.warn("Reaction Stream/Parse failed:", e);
+                dispatchAIStatus(requestId, 'gray'); 
+                const partialSpeech = extractStreamContent(e.message || "", 'speech');
+                return { speech: partialSpeech };
+            }
+        }
+
+        const result = await robustGenerate<{ speech: string, generatedSecrets?: any[] }>(
+            () => client.models.generateContent({
                 model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
                 contents: messages,
                 config: genConfig
-            });
-
-            let fullBuffer = "";
-            let currentSpeech = "";
-
-            for await (const chunk of stream) {
-                if (chunk.text) {
-                    fullBuffer += chunk.text;
-                    const newSpeech = extractStreamContent(fullBuffer, 'speech');
-                    if (newSpeech !== currentSpeech) {
-                        currentSpeech = newSpeech;
-                        // Remove quotes around speech
-                        onStream(`${currentSpeech}`);
-                    }
+            }),
+            (json) => json && json.speech,
+            2,
+            (error, rawResponse) => {
+                if (onDebug) {
+                    onDebug({
+                        id: `debug_react_fail_${char.name}_${Date.now()}`,
+                        timestamp: Date.now(),
+                        characterName: `${char.name} (Failed)`,
+                        prompt: JSON.stringify(messages, null, 2),
+                        response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
+                    });
+                }
+            },
+            (rawResponse) => {
+                if (onDebug) {
+                    onDebug({
+                        id: `debug_react_${char.name}_${Date.now()}`,
+                        timestamp: Date.now(),
+                        characterName: char.name,
+                        prompt: JSON.stringify(messages, null, 2),
+                        response: JSON.stringify(rawResponse, null, 2)
+                    });
                 }
             }
+        );
 
-            let cleanText = fullBuffer.replace(/```json/g, '').replace(/```/g, '').trim();
-            const json = JSON.parse(cleanText);
-
-            if (onDebug) {
-                onDebug({
-                    id: `debug_react_stream_${char.name}_${Date.now()}`,
-                    timestamp: Date.now(),
-                    characterName: char.name,
-                    prompt: JSON.stringify(messages, null, 2),
-                    response: fullBuffer
-                });
-            }
-
-            dispatchAIStatus(requestId, 'green'); // Visualizer Success
-            return json.speech || "";
-
-        } catch (e: any) {
-            console.warn("Reaction Stream/Parse failed:", e);
-            dispatchAIStatus(requestId, 'gray'); // Visualizer Fail
-            // Return what we got or empty string
-            return extractStreamContent(e.message || "", 'speech');
+        if (result) {
+            const rawSecrets = Array.isArray(result.generatedSecrets) ? result.generatedSecrets : [];
+            const mappedSecrets: Secret[] = rawSecrets.map((s: any) => ({
+                id: `sec_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                question: s.question,
+                correctAnswer: s.correctAnswer,
+                wrongAnswerA: s.wrongAnswerA,
+                wrongAnswerB: s.wrongAnswerB,
+                solved: false
+            }));
+            return { speech: result.speech, generatedSecrets: mappedSecrets };
         }
+
+        return { speech: "" };
     }
-
-    const result = await robustGenerate<{ speech: string }>(
-        () => client.models.generateContent({
-            model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
-            contents: messages,
-            config: genConfig
-        }),
-        (json) => json && json.speech,
-        2,
-        (error, rawResponse) => {
-            // Failure Callback
-            if (onDebug) {
-                onDebug({
-                    id: `debug_react_fail_${char.name}_${Date.now()}`,
-                    timestamp: Date.now(),
-                    characterName: `${char.name} (Failed)`,
-                    prompt: JSON.stringify(messages, null, 2),
-                    response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
-                });
-            }
-        }
-    );
-
-    if (onDebug && result) {
-        onDebug({
-            id: `debug_react_${char.name}_${Date.now()}`,
-            timestamp: Date.now(),
-            characterName: char.name,
-            prompt: JSON.stringify(messages, null, 2),
-            response: JSON.stringify(result, null, 2)
-        });
-    }
-
-    return result ? result.speech : "";
+    
+    return { speech: "" };
 };

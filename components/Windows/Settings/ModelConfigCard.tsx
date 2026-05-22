@@ -1,8 +1,8 @@
 
-import React from 'react';
-import { AIConfig, Provider, ReasoningEffort } from '../../../types';
+import React, { useState } from 'react';
+import { AIConfig, Provider, ReasoningEffort, CustomEndpoint } from '../../../types';
 import { Button, Input, Label } from '../../ui/Button';
-import { Lock, Wifi, FileText, RefreshCw, Brain } from 'lucide-react';
+import { Lock, Wifi, FileText, RefreshCw, Brain, Trash2, Server } from 'lucide-react';
 
 interface ModelConfigCardProps {
     title: string;
@@ -15,9 +15,12 @@ interface ModelConfigCardProps {
     isLocked: boolean; // Acts as isEditable
     testingConnectionName: string | null;
     configName: string; 
-    onSync?: () => void; 
+    onSync?: () => void;
+    onClearComments?: () => void; // New Prop for Clearing Comments
     providerDefaults: Record<string, string>;
-    accentColorClass?: string; 
+    accentColorClass?: string;
+    // New: Pass list of available custom endpoints
+    customEndpoints?: CustomEndpoint[];
 }
 
 export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
@@ -32,19 +35,23 @@ export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
     testingConnectionName,
     configName,
     onSync,
+    onClearComments,
     providerDefaults,
-    accentColorClass = "text-muted"
+    accentColorClass = "text-muted",
+    customEndpoints = []
 }) => {
+    const [confirmClear, setConfirmClear] = useState(false);
     
     const cycleReasoning = () => {
-        const cycle: ReasoningEffort[] = ['minimal', 'low', 'medium', 'high'];
-        const current = config.reasoningEffort || 'minimal';
+        const cycle: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high'];
+        const current = config.reasoningEffort || 'none';
         const nextIdx = (cycle.indexOf(current) + 1) % cycle.length;
         onChange({ ...config, reasoningEffort: cycle[nextIdx] });
     };
 
     const getReasoningStyle = (eff: ReasoningEffort) => {
         switch(eff) {
+            case 'minimal': return 'bg-blue-500/20 text-blue-500 border-blue-500/50';
             case 'low': return 'bg-red-500/20 text-red-500 border-red-500/50';
             case 'medium': return 'bg-yellow-500/20 text-yellow-500 border-yellow-500/50';
             case 'high': return 'bg-emerald-500/20 text-emerald-500 border-emerald-500/50';
@@ -54,6 +61,7 @@ export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
     
     const getReasoningLabel = (eff: ReasoningEffort) => {
         switch(eff) {
+            case 'minimal': return '极低';
             case 'low': return '低';
             case 'medium': return '中';
             case 'high': return '高';
@@ -61,7 +69,17 @@ export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
         }
     };
 
-    const currentEffort = config.reasoningEffort || 'minimal';
+    const handleClearClick = () => {
+        if (confirmClear && onClearComments) {
+            onClearComments();
+            setConfirmClear(false);
+        } else {
+            setConfirmClear(true);
+            setTimeout(() => setConfirmClear(false), 3000);
+        }
+    };
+
+    const currentEffort = config.reasoningEffort || 'none';
 
     return (
         <div className="bg-surface-highlight/30 p-4 rounded border border-border">
@@ -107,6 +125,18 @@ export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
                             <RefreshCw size={12}/> <span className="hidden sm:inline">强制应用到所有角色</span>
                         </Button>
                     )}
+                    {onClearComments && (
+                        <Button 
+                            size="sm" 
+                            variant={confirmClear ? "danger" : "secondary"}
+                            onClick={handleClearClick}
+                            title="清除已累积的读者意见" 
+                            className={`text-xs h-8 flex items-center gap-1 ${confirmClear ? "bg-danger text-white border-transparent" : "text-muted hover:text-danger-fg"}`}
+                            disabled={!isLocked}
+                        >
+                            <Trash2 size={12}/> <span className="hidden sm:inline">{confirmClear ? "确认清除?" : "清空批注"}</span>
+                        </Button>
+                    )}
                 </div>
             </div>
             
@@ -118,11 +148,18 @@ export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
                         value={config.provider}
                         onChange={e => {
                             const newProvider = e.target.value as Provider;
-                            onChange({
-                                ...config, 
-                                provider: newProvider,
-                                model: providerDefaults[newProvider] || '' 
-                            });
+                            const newConfig = { ...config, provider: newProvider };
+                            // If switching to standard provider, reset model to default
+                            if (newProvider !== Provider.CUSTOM) {
+                                newConfig.model = providerDefaults[newProvider] || '';
+                            } else {
+                                // If switching TO custom, try to pick first available endpoint
+                                if (customEndpoints.length > 0) {
+                                    newConfig.customEndpointId = customEndpoints[0].id;
+                                    newConfig.model = customEndpoints[0].model;
+                                }
+                            }
+                            onChange(newConfig);
                         }}
                         disabled={!isLocked}
                     >
@@ -132,17 +169,49 @@ export const ModelConfigCard: React.FC<ModelConfigCardProps> = ({
                         <option value={Provider.OPENROUTER}>OpenRouter</option>
                         <option value={Provider.OPENAI}>OpenAI</option>
                         <option value={Provider.CLAUDE}>Anthropic (Claude)</option>
+                        <option value={Provider.CUSTOM}>Custom (OpenAI Compatible)</option>
                     </select>
                 </div>
-                <div>
-                    <Label>Model Name / Endpoint ID</Label>
-                    <Input 
-                        value={config.model || ''} 
-                        onChange={e => onChange({...config, model: e.target.value})} 
-                        placeholder={providerDefaults[config.provider] || "e.g. grok-beta"} 
-                        disabled={!isLocked}
-                    />
-                </div>
+
+                {/* Conditional Field: Standard Model Input OR Custom Endpoint Select */}
+                {config.provider === Provider.CUSTOM ? (
+                     <div>
+                        <Label>Endpoint (端点)</Label>
+                        {customEndpoints.length > 0 ? (
+                            <select 
+                                className="w-full bg-surface border border-border rounded px-2 py-2 text-sm text-body disabled:opacity-50 disabled:cursor-not-allowed"
+                                value={config.customEndpointId || ""}
+                                onChange={e => {
+                                    const ep = customEndpoints.find(ep => ep.id === e.target.value);
+                                    onChange({
+                                        ...config, 
+                                        customEndpointId: e.target.value,
+                                        model: ep ? ep.model : config.model
+                                    });
+                                }}
+                                disabled={!isLocked}
+                            >
+                                {customEndpoints.map(ep => (
+                                    <option key={ep.id} value={ep.id}>{ep.name} ({ep.model})</option>
+                                ))}
+                            </select>
+                        ) : (
+                            <div className="text-xs text-danger-fg bg-danger/10 border border-danger/30 rounded p-2 flex items-center gap-2">
+                                <Server size={14}/> 请先在开发者设置中添加自定义端点
+                            </div>
+                        )}
+                    </div>
+                ) : (
+                    <div>
+                        <Label>Model Name / Endpoint ID</Label>
+                        <Input 
+                            value={config.model || ''} 
+                            onChange={e => onChange({...config, model: e.target.value})} 
+                            placeholder={providerDefaults[config.provider] || "e.g. grok-beta"} 
+                            disabled={!isLocked}
+                        />
+                    </div>
+                )}
             </div>
             
             <div className="flex flex-col sm:flex-row gap-4 sm:items-end">

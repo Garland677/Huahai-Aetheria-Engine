@@ -31,6 +31,10 @@
   /* Text: Slate-200 (Sat 1.0) */
   --text-story: oklch(0.929 0.013 255.51);
 
+  /* --- TYPOGRAPHY SETTINGS --- */
+  --story-font-size: 14px;
+  --story-font-weight: 500;
+
   /* --- SHADOWS --- */
   --shadow-modal: 
     0 25px 50px -12px rgba(0, 0, 0, 0.5), 

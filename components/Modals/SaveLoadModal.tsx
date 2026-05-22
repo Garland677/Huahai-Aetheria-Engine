@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { GameState, Character, LogEntry } from '../../types';
+import { GameState, Character, LogEntry, Card } from '../../types';
 import { Button, Input, Label } from '../ui/Button';
 import { Download, Upload, CheckSquare, Square, Globe, Cpu, MessageSquare, Key, Lock, FileText, Unlock, UserPlus, BrainCircuit, AlertTriangle, Users } from 'lucide-react';
 
@@ -16,7 +16,7 @@ interface SaveLoadModalProps {
     onClose: () => void;
     onSave: (progress: boolean, settings: boolean, model: boolean, context: boolean, filename: string) => void;
     onLoad: (progress: boolean, settings: boolean, model: boolean, context: boolean, data?: any) => void;
-    onImport: (chars: Character[], history: LogEntry[], keepMemory: boolean, memoryRounds: number) => void;
+    onImport: (chars: Character[], history: LogEntry[], keepMemory: boolean, memoryRounds: number, sourceCardPool?: Card[]) => void;
     onUpdateConfig: (newConfig: any) => void;
     parseAndValidateSave: (file: File) => Promise<any>;
 }
@@ -36,8 +36,10 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
     const [isImportMode, setIsImportMode] = useState(false);
     const [parsedImportChars, setParsedImportChars] = useState<Character[]>([]);
     const [parsedImportHistory, setParsedImportHistory] = useState<LogEntry[]>([]);
+    const [parsedCardPool, setParsedCardPool] = useState<Card[]>([]);
     const [selectedImportIds, setSelectedImportIds] = useState<Set<string>>(new Set());
     // Import Settings
+    // Note: memoryRounds is deprecated but kept for prop signature compatibility
     const [importSettings, setImportSettings] = useState({ keepMemory: false, memoryRounds: 20 });
     
     // Inputs
@@ -54,6 +56,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
             setIsImportMode(false);
             setParsedImportChars([]);
             setParsedImportHistory([]);
+            setParsedCardPool([]);
             setSelectedImportIds(new Set());
             setImportSettings({ keepMemory: false, memoryRounds: 20 });
             setLoadPasswordInput("");
@@ -65,15 +68,41 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
             });
 
             if (config.type === 'save') {
-                const date = new Date();
-                const timeStr = date.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-                const activeLoc = state.map.activeLocationId ? state.map.locations[state.map.activeLocationId] : null;
-                const regionName = activeLoc?.regionId && state.map.regions[activeLoc.regionId] ? state.map.regions[activeLoc.regionId].name : "UnknownRegion";
-                const locName = activeLoc ? activeLoc.name : "UnknownLoc";
-                setSaveFilename(`${timeStr}_${regionName}_${locName}`);
+                // --- 1. Round Number ---
+                const roundPart = `R${state.round.roundNumber}`;
+
+                // --- 2. Last Speech Snippet ---
+                let speechPart = "NewSave";
+                const history = state.world.history;
+                // Traverse backwards to find the latest meaningful speech
+                for (let i = history.length - 1; i >= 0; i--) {
+                    const log = history[i];
+                    // Skip system logs and logs that look like system messages
+                    if (log.type === 'system' || log.content.startsWith('系统') || log.content.startsWith('[')) continue;
+                    
+                    // Remove HTML tags
+                    let cleanContent = log.content.replace(/<[^>]*>?/gm, '');
+                    // Remove file system illegal characters: \ / : * ? " < > |
+                    cleanContent = cleanContent.replace(/[\\/:*?"<>|]/g, '');
+                    // Remove whitespace to make it compact
+                    cleanContent = cleanContent.replace(/\s+/g, '');
+                    
+                    if (cleanContent.length > 0) {
+                        speechPart = cleanContent.substring(0, 10);
+                        break;
+                    }
+                }
+
+                // --- 3. Numeric Timestamp (YYYYMMDDHHmmss) ---
+                const now = new Date();
+                const pad = (n: number) => n.toString().padStart(2, '0');
+                const timePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+                // Combine: R50_SpeechSnippet_20251231140356
+                setSaveFilename(`${roundPart}_${speechPart}_${timePart}`);
             }
         }
-    }, [config.isOpen, config.type]); // Intentionally not including state map deps to avoid reset on minor updates
+    }, [config.isOpen, config.type]);
 
     // Parse Logic
     useEffect(() => {
@@ -94,6 +123,11 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                         } else {
                             setParsedImportHistory([]);
                         }
+                        if (json.cardPool && Array.isArray(json.cardPool)) {
+                            setParsedCardPool(json.cardPool);
+                        } else {
+                            setParsedCardPool([]);
+                        }
                     }
                 })
                 .catch((e: any) => {
@@ -103,6 +137,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                         console.error("Secure load failed", e);
                         setParsedImportChars([]);
                         setParsedImportHistory([]);
+                        setParsedCardPool([]);
                         onUpdateConfig({ ...config, error: e.message || "文件解析或安全验证失败。" });
                     }
                 });
@@ -116,7 +151,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
             if (isImportMode) {
                 const selectedChars = parsedImportChars.filter(c => selectedImportIds.has(c.id));
                 if (selectedChars.length > 0) {
-                    onImport(selectedChars, parsedImportHistory, importSettings.keepMemory, importSettings.memoryRounds);
+                    onImport(selectedChars, parsedImportHistory, importSettings.keepMemory, importSettings.memoryRounds, parsedCardPool);
                 } else {
                     alert("请先选择至少一个角色。");
                 }
@@ -156,7 +191,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                     <div className="flex justify-between items-start mb-4">
                         <h3 className="text-lg font-bold text-highlight flex items-center gap-2">
                             {config.type === 'save' ? <Download size={20}/> : <Upload size={20}/>}
-                            {config.type === 'save' ? "保存游戏 (Save Game)" : "加载数据 (Load Data)"}
+                            {config.type === 'save' ? "保存游戏" : "加载数据"}
                         </h3>
                         {config.type === 'load' && config.fileToLoad && (
                             <div className="flex bg-surface-highlight rounded p-0.5 text-xs">
@@ -188,7 +223,8 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                     
                     {config.type === 'save' && (
                         <div className="mb-6">
-                            <Label className="mb-2 block">文件名 (Filename)</Label>
+                            {/* ... Save UI ... */}
+                            <Label className="mb-2 block">文件名</Label>
                             <div className="flex items-center gap-2 mb-4">
                                 <Input 
                                     value={saveFilename} 
@@ -207,7 +243,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                 >
                                     {options.progress ? <CheckSquare className="text-primary mr-3"/> : <Square className="text-muted mr-3"/>}
                                     <div>
-                                        <div className="font-bold text-sm text-body">游戏进度 (Game Progress)</div>
+                                        <div className="font-bold text-sm text-body">游戏进度</div>
                                         <div className="text-xs text-muted">包含角色、世界、地图、背包等当前状态。</div>
                                     </div>
                                 </div>
@@ -220,7 +256,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                     <div className="flex items-start gap-2">
                                         <Globe size={16} className="mt-1 text-primary"/>
                                         <div>
-                                            <div className="font-bold text-sm text-body">全局设置 (Global Settings)</div>
+                                            <div className="font-bold text-sm text-body">全局设置</div>
                                             <div className="text-xs text-muted">包含游戏规则、Prompt模版和默认值 (不含模型配置)。</div>
                                         </div>
                                     </div>
@@ -234,7 +270,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                     <div className="flex items-start gap-2">
                                         <Cpu size={16} className="mt-1 text-primary"/>
                                         <div>
-                                            <div className="font-bold text-sm text-body">模型接口 (Model Interface)</div>
+                                            <div className="font-bold text-sm text-body">模型接口</div>
                                             <div className="text-xs text-muted">包含 API Keys 及全局模型配置参数。</div>
                                         </div>
                                     </div>
@@ -248,7 +284,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                     <div className="flex items-start gap-2">
                                         <MessageSquare size={16} className="mt-1 text-primary"/>
                                         <div>
-                                            <div className="font-bold text-sm text-body">全局上下文工程 (Global Context)</div>
+                                            <div className="font-bold text-sm text-body">全局上下文工程</div>
                                             <div className="text-xs text-muted">包含定义的全局系统指令和世界观设定。</div>
                                         </div>
                                     </div>
@@ -267,7 +303,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                     {/* LOAD MODE CONTENT */}
                     {config.type === 'load' && (
                         <>
-                            {/* 1. Session Verification Logic */}
+                            {/* Session Verification Logic */}
                             {!!currentDevPassword && (
                                 <div className={`mb-4 p-3 rounded border transition-colors ${isLoadLocked ? 'bg-warning-base/20 border-warning-base/50' : 'bg-success-base/20 border-success-base/50'}`}>
                                     <div className="flex items-center gap-2 mb-2">
@@ -301,14 +337,14 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                             {/* Regular Full Load Options */}
                             {!isImportMode && (
                                 <div className={`space-y-4 mb-6 ${isLoadLocked ? 'opacity-50 pointer-events-none grayscale' : ''}`}>
-                                    {/* Same Checkboxes as Save but for Load scope */}
+                                    {/* ... Checkboxes ... */}
                                     <div 
                                       className={`flex items-center p-3 rounded border cursor-pointer transition-colors ${options.progress ? 'bg-primary/20 border-primary' : 'bg-surface-light border-border'}`}
                                       onClick={() => setOptions(p => ({ ...p, progress: !p.progress }))}
                                     >
                                         {options.progress ? <CheckSquare className="text-primary mr-3"/> : <Square className="text-muted mr-3"/>}
                                         <div>
-                                            <div className="font-bold text-sm text-body">游戏进度 (Game Progress)</div>
+                                            <div className="font-bold text-sm text-body">游戏进度</div>
                                             <div className="text-xs text-muted">包含角色、世界、地图、背包等当前状态。</div>
                                         </div>
                                     </div>
@@ -321,7 +357,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                         <div className="flex items-start gap-2">
                                             <Globe size={16} className="mt-1 text-primary"/>
                                             <div>
-                                                <div className="font-bold text-sm text-body">全局设置 (Global Settings)</div>
+                                                <div className="font-bold text-sm text-body">全局设置</div>
                                                 <div className="text-xs text-muted">包含游戏规则、Prompt模版和默认值。</div>
                                             </div>
                                         </div>
@@ -335,7 +371,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                         <div className="flex items-start gap-2">
                                             <Cpu size={16} className="mt-1 text-primary"/>
                                             <div>
-                                                <div className="font-bold text-sm text-body">模型接口 (Model Interface)</div>
+                                                <div className="font-bold text-sm text-body">模型接口</div>
                                                 <div className="text-xs text-muted">包含 API Keys 及全局模型配置参数。</div>
                                             </div>
                                         </div>
@@ -349,7 +385,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                         <div className="flex items-start gap-2">
                                             <MessageSquare size={16} className="mt-1 text-primary"/>
                                             <div>
-                                                <div className="font-bold text-sm text-body">全局上下文工程 (Global Context)</div>
+                                                <div className="font-bold text-sm text-body">全局上下文工程</div>
                                                 <div className="text-xs text-muted">包含定义的全局系统指令和世界观设定。</div>
                                             </div>
                                         </div>
@@ -396,23 +432,11 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
                                                 onChange={e => setImportSettings({...importSettings, keepMemory: e.target.checked})}
                                                 className="accent-primary"
                                             />
-                                            <span>保留角色记忆 (Keep Memory)</span>
+                                            <span>保留角色记忆</span>
                                         </label>
                                         
-                                        {importSettings.keepMemory && (
-                                            <div className="flex items-center gap-2 text-xs ml-6 animate-in fade-in slide-in-from-top-1">
-                                                <span>提取最近</span>
-                                                <Input 
-                                                    type="number" 
-                                                    className="w-12 h-6 text-center"
-                                                    value={importSettings.memoryRounds}
-                                                    onChange={e => setImportSettings({...importSettings, memoryRounds: parseInt(e.target.value) || 0})}
-                                                />
-                                                <span>轮历史作为前世记忆</span>
-                                            </div>
-                                        )}
-                                        <div className="text-[10px] text-muted leading-tight">
-                                            若勾选，系统将从源文件的历史记录中提取相关记忆，并追加到角色描述中。
+                                        <div className="text-[10px] text-muted leading-tight ml-5">
+                                            若勾选，系统将从源文件提取<b>全部</b>相关历史记录（包括前世记忆），并整合到角色数据中。
                                         </div>
                                     </div>
                                 </div>
@@ -422,7 +446,7 @@ export const SaveLoadModal: React.FC<SaveLoadModalProps> = ({
 
                     {/* Footer Buttons */}
                     <div className="mt-6 flex justify-end gap-3 pt-4 border-t border-border">
-                        <Button variant="secondary" onClick={onClose}>取消 (Cancel)</Button>
+                        <Button variant="secondary" onClick={onClose}>取消</Button>
                         <Button 
                             onClick={handleConfirm} 
                             disabled={isLoadLocked || (config.type === 'load' && !config.dataToLoad && !isImportMode)}

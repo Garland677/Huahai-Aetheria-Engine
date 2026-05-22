@@ -9,6 +9,7 @@ export interface SelectionItem {
     description?: string;
     icon?: string;
     isSelf?: boolean;
+    dataRef?: any;
 }
 
 interface SelectionPopoverProps {
@@ -18,9 +19,48 @@ interface SelectionPopoverProps {
     onSelect: (id: string) => void;
     onClose: () => void;
     onSourceClick?: () => void;
+    keyboardTargetRef?: React.RefObject<HTMLElement>;
 }
 
 export const SelectionPopover: React.FC<SelectionPopoverProps> = ({ title, items, anchorRect, onSelect, onClose, onSourceClick }) => {
+    const [selectedIndex, setSelectedIndex] = React.useState(0);
+
+    React.useEffect(() => {
+        setSelectedIndex(0);
+    }, [items.length, items[0]?.id]);
+
+    React.useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Do not steal events if the user is using the IME (e.g. they are selecting Chinese characters)
+            if (e.isComposing || e.keyCode === 229) return;
+            
+            if (items.length === 0) return;
+            
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                e.stopPropagation();
+                setSelectedIndex(prev => (prev + 1) % items.length);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                e.stopPropagation();
+                setSelectedIndex(prev => (prev - 1 + items.length) % items.length);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                if (items[selectedIndex]) {
+                    onSelect(items[selectedIndex].id);
+                }
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                onClose();
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown, { capture: true });
+        return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
+    }, [items, selectedIndex, onSelect, onClose]);
+
     const popoverWidth = 240; // Slightly wider for better text fit
     
     // Height Calculation: 
@@ -89,11 +129,11 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({ title, items
                 </div>
                 <div className="overflow-y-auto p-1 custom-scrollbar bg-surface/30 flex-1">
                     {items.length === 0 && <div className="text-center text-muted text-xs py-4">无可用选项</div>}
-                    {items.map(item => (
+                    {items.map((item, index) => (
                         <button
                             key={item.id}
                             onClick={() => onSelect(item.id)}
-                            className="w-full flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-left transition-colors group min-h-[48px]"
+                            className={`w-full flex items-center gap-2 p-2 rounded text-left transition-colors group min-h-[48px] ${index === selectedIndex ? 'bg-dopamine/15 border border-dopamine/50 text-dopamine' : 'hover:bg-surface-highlight border border-transparent'}`}
                         >
                             <div className="w-8 h-8 rounded bg-surface-light border border-border overflow-hidden shrink-0 group-hover:border-highlight flex items-center justify-center">
                                 {item.icon ? (
@@ -103,11 +143,11 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({ title, items
                                 )}
                             </div>
                             <div className="flex-1 min-w-0">
-                                <div className="text-xs font-bold text-body truncate flex items-center gap-1">
+                                <div className={`text-xs font-bold truncate flex items-center gap-1 ${index === selectedIndex ? 'text-dopamine' : 'text-body'}`}>
                                     {item.name}
                                     {item.isSelf && <span className="text-[9px] bg-primary/20 text-primary px-1 rounded">我</span>}
                                 </div>
-                                {item.description && <div className="text-[9px] text-muted truncate">{item.description}</div>}
+                                {item.description && <div className={`text-[9px] truncate ${index === selectedIndex ? 'text-dopamine/80' : 'text-muted'}`}>{item.description}</div>}
                             </div>
                         </button>
                     ))}

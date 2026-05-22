@@ -76,6 +76,7 @@ export const SlidingLayout: React.FC<SlidingLayoutProps> = ({ currentView, onCha
         const deltaY = currentY - touchStartY.current;
 
         // Stricter Threshold: Horizontal movement must be dominant
+        // If vertical movement is significant, we treat it as a scroll and don't update dragX
         if (Math.abs(deltaY) * 1.2 > Math.abs(deltaX)) {
             return; 
         }
@@ -99,8 +100,20 @@ export const SlidingLayout: React.FC<SlidingLayoutProps> = ({ currentView, onCha
         }
 
         const touchEndX = e.changedTouches[0].clientX;
+        const touchEndY = e.changedTouches[0].clientY;
+
         const finalDeltaX = touchEndX - touchStartX.current;
+        const finalDeltaY = touchEndY - touchStartY.current;
         
+        // FIX: Check if the gesture was primarily vertical (scrolling)
+        // If vertical distance > horizontal distance, treat as scroll and ignore swipe navigation.
+        if (Math.abs(finalDeltaY) > Math.abs(finalDeltaX)) {
+            touchStartX.current = null;
+            touchStartY.current = null;
+            setDragX(0);
+            return;
+        }
+
         // Reset refs
         touchStartX.current = null;
         touchStartY.current = null;

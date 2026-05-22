@@ -1,12 +1,42 @@
 
 import React, { useState, useMemo } from 'react';
 import { DebugLog } from '../../types';
-import { X, Terminal, MessageSquare, ChevronRight, ChevronDown, AlertCircle, CheckCircle, Clock } from 'lucide-react';
+import { X, Terminal, MessageSquare, ChevronRight, ChevronDown, AlertCircle, CheckCircle, Clock, Copy, Check } from 'lucide-react';
 
 interface DevConsoleProps {
     logs: DebugLog[];
     onClose: () => void;
 }
+
+const CopyButton = ({ text }: { text: string }) => {
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        });
+    };
+
+    return (
+        <button 
+            onClick={handleCopy} 
+            className={`p-1 rounded transition-all flex items-center gap-1 ${copied ? 'text-success-fg bg-success-base/10' : 'text-muted hover:text-highlight hover:bg-surface'}`}
+            title="Copy Raw Response"
+        >
+            {copied ? (
+                <>
+                    <Check size={12} />
+                    <span className="text-[9px]">Copied</span>
+                </>
+            ) : (
+                <Copy size={12} />
+            )}
+        </button>
+    );
+};
 
 export const DevConsole: React.FC<DevConsoleProps> = ({ logs, onClose }) => {
     const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -39,7 +69,7 @@ export const DevConsole: React.FC<DevConsoleProps> = ({ logs, onClose }) => {
                     <div className="flex flex-col gap-2 mt-1">
                         {parsed.map((msg: any, idx: number) => (
                             <div key={idx} className="flex flex-col border border-border rounded overflow-hidden text-[10px]">
-                                <div className={`px-2 py-1 font-bold uppercase ${msg.role === 'system' ? 'bg-danger/20 text-danger-fg' : msg.role === 'model' || msg.role === 'assistant' ? 'bg-secondary/20 text-secondary-fg' : 'bg-primary/20 text-primary-fg'}`}>
+                                <div className={`px-2 py-1 font-bold uppercase ${msg.role === 'system' ? 'bg-danger/20 text-danger' : msg.role === 'model' || msg.role === 'assistant' ? 'bg-secondary/20 text-dopamine' : 'bg-primary/20 text-primary'}`}>
                                     {msg.role}
                                 </div>
                                 <div className="p-2 bg-surface-highlight whitespace-pre-wrap text-muted font-mono break-all">
@@ -119,8 +149,9 @@ export const DevConsole: React.FC<DevConsoleProps> = ({ logs, onClose }) => {
 
                                  {/* Right: Response */}
                                  <div className="flex flex-col h-full min-h-0">
-                                     <div className="p-2 bg-surface-highlight/50 text-secondary-fg font-bold text-[10px] uppercase tracking-wider border-b border-border shrink-0">
-                                         Raw Response
+                                     <div className="p-2 bg-surface-highlight/50 text-dopamine font-bold text-[10px] uppercase tracking-wider border-b border-border shrink-0 flex justify-between items-center">
+                                         <span>Raw Response</span>
+                                         <CopyButton text={log.response} />
                                      </div>
                                      <pre className={`flex-1 overflow-y-auto p-3 whitespace-pre-wrap font-mono text-xs bg-surface-light/50 custom-scrollbar ${isError ? 'text-danger-fg' : 'text-muted'}`}>
                                          {log.response}

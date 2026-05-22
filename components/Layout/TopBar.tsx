@@ -79,8 +79,8 @@ export const TopBar: React.FC<TopBarProps> = ({
                  <span>花海</span>
                  <div className="relative w-32 lg:w-64 h-5 overflow-hidden mask-gradient select-none">
                      <div className="absolute whitespace-nowrap animate-scroll-left text-[10px] text-muted flex items-center h-full">
-                         <span className="mr-8">V1 github.com/954114865/Huahai-Aetheria-Engine</span>
-                         <span className="mr-8">V1 github.com/954114865/Huahai-Aetheria-Engine</span>
+                         <span className="mr-8">V1 github.com/Garland677/Huahai-Aetheria-Engine</span>
+                         <span className="mr-8">V1 github.com/Garland677/Huahai-Aetheria-Engine</span>
                      </div>
                  </div>
              </h1>
@@ -111,6 +111,32 @@ export const TopBar: React.FC<TopBarProps> = ({
 
          {/* Spacer to push right utilities */}
          <div className="flex-1"></div>
+         
+         {/* MOBILE EXCLUSIVE: World & Trigger Buttons (Order 1 & 2) */}
+         <div className="flex md:hidden items-center gap-1">
+             {/* 1. World Composition (Oxytocin) */}
+             <Button 
+                size="sm" 
+                variant="secondary" 
+                onClick={() => !isWorldLocked && openWindow('world_composition' as any)} 
+                className={`px-2 h-8 ${isWorldLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={isWorldLocked ? "已锁定" : "世界构成"}
+                disabled={isWorldLocked}
+             >
+                 {isWorldLocked ? <Lock size={16}/> : <Globe size={16} className="text-oxytocin"/>}
+             </Button>
+             
+             {/* 2. Triggers (Libido) */}
+             <Button 
+                size="sm" 
+                variant="secondary" 
+                onClick={() => !locked.triggerEditor && openWindow('trigger_pool')} 
+                className={`px-2 h-8 ${locked.triggerEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={locked.triggerEditor ? "已锁定" : "触发器"}
+             >
+                 {locked.triggerEditor ? <Lock size={16}/> : <Zap size={16} className="text-libido"/>}
+             </Button>
+         </div>
 
          {/* Right Utilities (Desktop / Tablet) */}
          <div className="hidden md:flex gap-2 items-center shrink-0 z-20 bg-app pl-2">
@@ -141,33 +167,14 @@ export const TopBar: React.FC<TopBarProps> = ({
                  <div className="flex items-center gap-1 border-r border-border pr-2 mr-2">
                      <button onClick={restartGame} className="p-2 text-muted hover:text-endorphin hover:bg-surface-highlight rounded transition-colors" title="重置游戏"><RotateCcw size={16}/></button>
                      <div className="w-px h-4 bg-border mx-1"></div>
-                     <button onClick={() => openWindow('story_edit')} className="p-2 text-muted hover:text-endorphin hover:bg-surface-highlight rounded transition-colors" title="故事编辑/清空"><BookOpen size={16}/></button>
-                     <div className="w-px h-4 bg-border mx-1"></div>
                      <button onClick={onSaveClick} className="p-2 text-muted hover:text-body hover:bg-surface-highlight rounded"><Download size={16}/></button>
                      <button onClick={() => { if(fileInputRef.current) { fileInputRef.current.value = ''; fileInputRef.current.click(); } }} className="p-2 text-muted hover:text-body hover:bg-surface-highlight rounded"><Upload size={16}/></button>
                  </div>
              </div>
 
-             {/* GROUP B: Pool Buttons (Always visible on Tablet+) */}
-             {state.devMode && (
-                <Button size="sm" variant="secondary" onClick={() => openWindow('dev')} className="px-2 text-success-fg border-success/30" title="Debug Console">
-                    <Terminal size={16}/>
-                </Button>
-             )}
-
-             <Button size="sm" variant="secondary" onClick={() => openWindow('settings')} className="px-2 sm:px-3"><Settings size={16} /></Button>
+             {/* GROUP B: Feature Buttons (Ordered 1-5) */}
              <div className="flex gap-2">
-                 <Button 
-                    size="sm" 
-                    variant="secondary" 
-                    onClick={() => !locked.cardPoolEditor && openWindow('pool')} 
-                    className={`px-2 ${locked.cardPoolEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    title={locked.cardPoolEditor ? "已锁定 (Locked)" : "卡池"}
-                 >
-                     {locked.cardPoolEditor ? <Lock size={16}/> : <Layers size={16}/>}
-                 </Button>
-                 
-                 {/* Unified World Composition Button */}
+                 {/* 1. World Composition -> Oxytocin */}
                  <Button 
                     size="sm" 
                     variant="secondary" 
@@ -176,18 +183,10 @@ export const TopBar: React.FC<TopBarProps> = ({
                     title={isWorldLocked ? "已锁定 (Locked)" : "世界构成 (角色/地点)"}
                     disabled={isWorldLocked}
                  >
-                     {isWorldLocked ? <Lock size={16}/> : <Globe size={16}/>}
+                     {isWorldLocked ? <Lock size={16}/> : <Globe size={16} className="text-oxytocin"/>}
                  </Button>
 
-                 <Button 
-                    size="sm" 
-                    variant="secondary" 
-                    onClick={() => !locked.prizePoolEditor && openWindow('prize_pool')} 
-                    className={`px-2 ${locked.prizePoolEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    title={locked.prizePoolEditor ? "已锁定 (Locked)" : "奖池 (Lottery)"}
-                 >
-                     {locked.prizePoolEditor ? <Lock size={16}/> : <Gift size={16}/>}
-                 </Button>
+                 {/* 2. Triggers -> Libido */}
                  <Button 
                     size="sm" 
                     variant="secondary" 
@@ -195,26 +194,58 @@ export const TopBar: React.FC<TopBarProps> = ({
                     className={`px-2 ${locked.triggerEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
                     title={locked.triggerEditor ? "已锁定 (Locked)" : "触发器 (Triggers)"}
                  >
-                     {locked.triggerEditor ? <Lock size={16}/> : <Zap size={16}/>}
+                     {locked.triggerEditor ? <Lock size={16}/> : <Zap size={16} className="text-libido"/>}
+                 </Button>
+
+                 {/* 3. Card Pool -> Endorphin */}
+                 <Button 
+                    size="sm" 
+                    variant="secondary" 
+                    onClick={() => !locked.cardPoolEditor && openWindow('pool')} 
+                    className={`px-2 ${locked.cardPoolEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    title={locked.cardPoolEditor ? "已锁定 (Locked)" : "卡池"}
+                 >
+                     {locked.cardPoolEditor ? <Lock size={16}/> : <Layers size={16} className="text-endorphin"/>}
+                 </Button>
+
+                 {/* 4. Prize Pool -> Dopamine */}
+                 <Button 
+                    size="sm" 
+                    variant="secondary" 
+                    onClick={() => !locked.prizePoolEditor && openWindow('prize_pool')} 
+                    className={`px-2 ${locked.prizePoolEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    title={locked.prizePoolEditor ? "已锁定 (Locked)" : "奖池 (Lottery)"}
+                 >
+                     {locked.prizePoolEditor ? <Lock size={16}/> : <Gift size={16} className="text-dopamine"/>}
+                 </Button>
+
+                 {/* 5. Settings -> White (Default) */}
+                 <Button size="sm" variant="secondary" onClick={() => openWindow('settings')} className="px-2 sm:px-3">
+                     <Settings size={16} />
                  </Button>
              </div>
+             
+             {/* Dev Console (Optional/Hidden) */}
+             {state.devMode && (
+                <Button size="sm" variant="secondary" onClick={() => openWindow('dev')} className="px-2 text-success-fg border-success/30" title="Debug Console">
+                    <Terminal size={16}/>
+                </Button>
+             )}
          </div>
 
          {/* Mobile Menu Toggle (Visible < LG) */}
-         {/* Updated breakpoint: Shows on Tablet/Narrow screens now too */}
          <div className="lg:hidden flex items-center gap-2">
              <Button size="sm" variant="ghost" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="px-2 text-muted">
                  {isMobileMenuOpen ? <X size={24}/> : <Menu size={24}/>}
              </Button>
          </div>
 
-         {/* Mobile Dropdown Menu - Styled as Glass Panel */}
+         {/* Mobile Dropdown Menu */}
          {isMobileMenuOpen && (
              <>
                  <div className="fixed inset-0 z-40 bg-transparent" onClick={() => setIsMobileMenuOpen(false)} />
-                 <div className="absolute top-16 right-4 w-52 glass-panel z-50 flex flex-col p-2 animate-in fade-in slide-in-from-top-2 border-primary/20">
+                 <div className="fixed top-16 right-4 w-52 glass-panel z-[60] flex flex-col p-2 animate-in fade-in slide-in-from-top-2 border-primary/20">
                      <div className="flex flex-col gap-1 border-b border-border pb-2 mb-2">
-                         {/* Time & Utility Toggles - Always visible in menu when opened (since button is lg:hidden) */}
                          <button 
                             onClick={() => handleAction(() => updateState(s => ({...s, round: {...s.round, isWorldTimeFlowPaused: !s.round.isWorldTimeFlowPaused}})))}
                             className="flex items-center gap-2 p-2 rounded text-sm text-left text-muted hover:bg-surface-highlight hover:text-body"
@@ -236,47 +267,35 @@ export const TopBar: React.FC<TopBarProps> = ({
                              <Upload size={16}/> 读取进度
                          </button>
                          
-                         <button onClick={() => handleAction(() => openWindow('story_edit'))} className="flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-endorphin text-left">
-                             <BookOpen size={16}/> 故事编辑
-                         </button>
                          <button onClick={() => handleAction(restartGame)} className="flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-endorphin text-left">
                              <RotateCcw size={16}/> 重置游戏
                          </button>
                      </div>
 
-                     {/* Pool Buttons - Only visible in Menu on very small screens (md:hidden) */}
-                     {/* Because on Tablet (MD), they are already on the TopBar */}
+                     {/* Mobile Menu Items: Card, Prize, Settings (Order 3, 4, 5) */}
+                     {/* World and Triggers are visible on the bar itself */}
                      <div className="flex flex-col gap-1 md:hidden">
-                         <button onClick={() => handleAction(() => openWindow('settings'))} className="flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-body text-left">
-                             <Settings size={16}/> 设置
-                         </button>
+                         {/* 3. Card Pool */}
                          <button 
                             onClick={() => !locked.cardPoolEditor && handleAction(() => openWindow('pool'))} 
                             className={`flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-body text-left ${locked.cardPoolEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
                          >
-                             {locked.cardPoolEditor ? <Lock size={16}/> : <Layers size={16}/>} 卡池
+                             {locked.cardPoolEditor ? <Lock size={16}/> : <Layers size={16} className="text-endorphin"/>} 卡池
                          </button>
                          
-                         <button 
-                            onClick={() => !isWorldLocked && handleAction(() => openWindow('world_composition' as any))} 
-                            className={`flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-body text-left ${isWorldLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            disabled={isWorldLocked}
-                         >
-                             {isWorldLocked ? <Lock size={16}/> : <Globe size={16}/>} 世界构成
-                         </button>
-
+                         {/* 4. Prize Pool */}
                          <button 
                             onClick={() => !locked.prizePoolEditor && handleAction(() => openWindow('prize_pool'))} 
                             className={`flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-body text-left ${locked.prizePoolEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
                          >
-                             {locked.prizePoolEditor ? <Lock size={16}/> : <Gift size={16}/>} 奖池
+                             {locked.prizePoolEditor ? <Lock size={16}/> : <Gift size={16} className="text-dopamine"/>} 奖池
                          </button>
-                         <button 
-                            onClick={() => !locked.triggerEditor && handleAction(() => openWindow('trigger_pool'))} 
-                            className={`flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-body text-left ${locked.triggerEditor ? 'opacity-50 cursor-not-allowed' : ''}`}
-                         >
-                             {locked.triggerEditor ? <Lock size={16}/> : <Zap size={16}/>} 触发器
+                         
+                         {/* 5. Settings */}
+                         <button onClick={() => handleAction(() => openWindow('settings'))} className="flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-body text-left">
+                             <Settings size={16}/> 设置
                          </button>
+
                          {state.devMode && (
                             <button onClick={() => handleAction(() => openWindow('dev'))} className="flex items-center gap-2 p-2 hover:bg-surface-highlight rounded text-sm text-success-fg text-left">
                                 <Terminal size={16}/> Debug Console
@@ -294,8 +313,6 @@ export const TopBar: React.FC<TopBarProps> = ({
             ref={fileInputRef} 
             onChange={handleLoadFileChange} 
             className="hidden" 
-            // If native chooser forced, remove accept to allow all file pickers (including raw file managers)
-            // Otherwise use explicit .json and mime type for broad compatibility in web mode
             {...(useNativeChooser ? {} : { accept: ".json,application/json" })}
          />
       </div>

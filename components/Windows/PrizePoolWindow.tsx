@@ -4,6 +4,7 @@ import { GameState, PrizePool, PrizeItem, MapLocation } from '../../types';
 import { Button, Input, TextArea, Label } from '../ui/Button';
 import { X, Plus, Trash2, Gift, Edit, Save, FileText, CheckCircle, AlertTriangle, ArrowRight, EyeOff, Eye, MapPin, CheckSquare, Square, ChevronUp, ChevronDown } from 'lucide-react';
 import { Window } from '../ui/Window';
+import { generateShortId, generatePrizePoolId, generatePrizeItemId } from '../../services/idUtils';
 
 interface PrizePoolWindowProps {
     winId: number;
@@ -30,7 +31,7 @@ export const PrizePoolWindow: React.FC<PrizePoolWindowProps> = ({ winId, state, 
     const knownLocations = (Object.values(state.map.locations) as MapLocation[]).filter(l => l.isKnown);
 
     const handleCreatePool = () => {
-        const newId = `pool_${Date.now()}`;
+        const newId = generatePrizePoolId(state.prizePools || {});
         const activeLocId = state.map.activeLocationId;
         
         const newPool: PrizePool = {
@@ -102,8 +103,11 @@ export const PrizePoolWindow: React.FC<PrizePoolWindowProps> = ({ winId, state, 
 
     const handleAddItem = () => {
         if (!activePool) return;
+        // Collect existing IDs to avoid collision
+        const existingItemIds = new Set(activePool.items.map(i => i.id));
+        
         const newItem: PrizeItem = {
-            id: `pitem_${Date.now()}`,
+            id: generatePrizeItemId(existingItemIds),
             name: "新物品",
             description: "物品描述",
             weight: 10,
@@ -153,6 +157,7 @@ export const PrizePoolWindow: React.FC<PrizePoolWindowProps> = ({ winId, state, 
             : "无描述";
 
         const newItems: PrizeItem[] = [];
+        const existingItemIds = new Set<string>(); // New set for batch
 
         try {
             lines.forEach((line, index) => {
@@ -192,8 +197,11 @@ export const PrizePoolWindow: React.FC<PrizePoolWindowProps> = ({ winId, state, 
                 // Apply dynamic default if desc is missing
                 if (!desc) desc = defaultDesc;
 
+                const newId = generatePrizeItemId(existingItemIds);
+                existingItemIds.add(newId);
+
                 newItems.push({
-                    id: `pitem_bulk_${Date.now()}_${index}`,
+                    id: newId,
                     name: name,
                     description: desc,
                     weight: 10,

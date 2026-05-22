@@ -7,10 +7,10 @@ export const DEFAULT_THEME_CONFIG: ThemeConfig = {
     light: {
         baseHue: "orange-50",
         primaryHue: "orange-900",
-        secondaryHue: "orange-900",
+        secondaryHue: "orange-100",
         baseSat: 0.2,
         primarySat: 0.7,
-        secondarySat: 0.8,
+        secondarySat: 0.5,
         
         // Semantic Colors
         endorphinHue: "red-700",
@@ -233,6 +233,8 @@ export const applyThemeToRoot = (themeConfig: ThemeConfig, isGlobalLightMode: bo
     // Dopamine
     set('--dopamine-base', resolveColor(dopamineObj.hue, dopamineObj.shade, dopamineSat));
     set('--dopamine-fg', resolveColor(dopamineObj.hue, isDarkBase ? 200 : 800, dopamineSat));
+    // New: Dopamine for Story Log with extra 0.7 saturation
+    set('--dopamine-log', resolveColor(dopamineObj.hue, dopamineObj.shade, dopamineSat * 0.7));
 
     // Endorphin
     set('--endorphin-base', resolveColor(endorphinObj.hue, endorphinObj.shade, endorphinSat));

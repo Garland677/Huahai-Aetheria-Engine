@@ -1,16 +1,17 @@
 
 import React, { useState, useEffect } from 'react';
-import { Character, Provider, AttributeType, Card, GameState, GameAttribute, AttributeVisibility, Drive, MapLocation, Conflict, GameImage } from '../../types';
+import { Character, Provider, AttributeType, Card, GameState, GameAttribute, AttributeVisibility, Drive, MapLocation, Conflict, GameImage, Secret, WindowState } from '../../types';
 import { Button, Input, Label, TextArea } from '../ui/Button';
-import { Save, BrainCircuit, Plus, Edit, Trash, Eye, EyeOff, Coins, Cpu, User, AlertTriangle, Footprints, Dices, MessageSquare, Heart, VenetianMask, Info, Activity, Layers, Package, Upload, RefreshCw, Eraser, Settings2, Globe } from 'lucide-react';
+import { Save, BrainCircuit, Plus, Edit, Trash, Eye, EyeOff, Coins, Cpu, User, AlertTriangle, Footprints, Dices, MessageSquare, Heart, VenetianMask, Info, Activity, Layers, Package, Upload, RefreshCw, Eraser, Settings2, Globe, TrendingUp, History, CheckCircle, Lock, Unlock, BookOpen, ChevronRight, FileClock, Briefcase } from 'lucide-react';
 import { CardEditor } from './CardEditor';
 import { generateRandomFlagAvatar } from '../../assets/imageLibrary';
-import { getCharacterMemory } from '../../services/aiService';
+import { getAllCharacterLogs } from '../../services/ai/memoryUtils';
 import { defaultAcquireCard, defaultInteractCard, defaultTradeCard } from '../../services/DefaultSettings';
 import { ContextEditorModal } from './Settings/ContextEditorModal';
 import { Window } from '../ui/Window';
 import { ImageAttachmentList } from '../ui/ImageAttachmentList';
 import { ImageUploadModal } from '../Modals/ImageUploadModal';
+import { generateCharacterId, generateConflictId, generateDriveId, generateCardId } from '../../services/idUtils';
 
 interface CharacterEditorProps {
   character?: Character; // Or Partial with special config
@@ -19,24 +20,18 @@ interface CharacterEditorProps {
   gameState: GameState; 
   onUpdatePoolCard?: (card: Card) => void; 
   isTemplate?: boolean;
+  openWindow?: (type: WindowState['type'], data?: any) => void;
 }
 
-export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onSave, onClose, gameState, onUpdatePoolCard, isTemplate = false }) => {
+export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onSave, onClose, gameState, onUpdatePoolCard, isTemplate = false, openWindow }) => {
   
-  const generateNextId = () => {
-      const existingIds = Object.keys(gameState.characters).map(id => Number(id)).filter(n => !isNaN(n));
-      let next = 1;
-      while (existingIds.includes(next)) {
-          next++;
-      }
-      return next.toString();
-  };
-
   const getInitialState = (): Character => {
       if (character && character.id) return character;
       
       const tmpl = JSON.parse(JSON.stringify(gameState.defaultSettings.templates.character));
-      tmpl.id = generateNextId();
+      
+      // Use standardized ID generation
+      tmpl.id = generateCharacterId(gameState.characters);
       
       if (!tmpl.avatarUrl) {
           tmpl.avatarUrl = generateRandomFlagAvatar();
@@ -95,6 +90,8 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   const [confirmDeleteSkillId, setConfirmDeleteSkillId] = useState<string | null>(null);
 
   const [showContextModal, setShowContextModal] = useState(false);
+  const [showConflictHistory, setShowConflictHistory] = useState(false);
+  const [showSecretsModal, setShowSecretsModal] = useState(false);
   
   // Image Upload State - Extended to include 'avatar'
   const [showImageUpload, setShowImageUpload] = useState<{ target: 'appearance' | 'description' | 'avatar' } | null>(null);
@@ -124,8 +121,9 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   };
 
   const removeAttribute = (key: string) => {
-      const cores = ['cp', 'health', 'physique', 'pleasure', 'energy'];
-      if (cores.includes(key)) {
+      // Enhanced protection for core attributes including Chinese keys
+      const cores = ['cp', 'health', 'physique', 'pleasure', 'energy', 'active', '健康', '体能', '快感', '能量', '创造点', '活跃'];
+      if (cores.includes(key) || cores.includes(key.toLowerCase())) {
           alert("核心属性无法删除");
           return;
       }
@@ -137,7 +135,7 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   const addDrive = () => {
       setChar(prev => ({
           ...prev,
-          drives: [...(prev.drives || []), { id: `drive_${Date.now()}`, condition: '', amount: 10, weight: 50 }]
+          drives: [...(prev.drives || []), { id: generateDriveId(prev.drives || []), condition: '', amount: 10, weight: 50 }]
       }));
   };
   
@@ -152,32 +150,37 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   };
 
   const addConflict = () => {
-      let maxId = 0;
-      (Object.values(gameState.characters) as Character[]).forEach(c => {
-          c.conflicts?.forEach(x => {
-              const n = parseInt(x.id);
-              if(!isNaN(n) && n > maxId) maxId = n;
-          });
-      });
-      char.conflicts?.forEach(x => {
-          const n = parseInt(x.id);
-          if(!isNaN(n) && n > maxId) maxId = n;
-      });
-
       setChar(prev => ({
           ...prev,
-          conflicts: [...(prev.conflicts || []), { id: String(maxId + 1), desc: '', apReward: 5, solved: false }]
+          conflicts: [...(prev.conflicts || []), { id: generateConflictId(prev.conflicts || []), desc: '', apReward: 5, solved: false }]
       }));
   };
 
-  const updateConflict = (index: number, field: keyof Conflict, val: any) => {
+  // Find index in main array by ID to update correctly even when filtered
+  const updateConflictById = (id: string, field: keyof Conflict, val: any) => {
+      const idx = (char.conflicts || []).findIndex(c => c.id === id);
+      if (idx === -1) return;
+      
       const newConf = [...(char.conflicts || [])];
-      newConf[index] = { ...newConf[index], [field]: val };
+      newConf[idx] = { ...newConf[idx], [field]: val };
       setChar(prev => ({ ...prev, conflicts: newConf }));
   };
 
-  const removeConflict = (index: number) => {
-      setChar(prev => ({ ...prev, conflicts: (prev.conflicts || []).filter((_, i) => i !== index) }));
+  const removeConflictById = (id: string) => {
+      setChar(prev => ({ ...prev, conflicts: (prev.conflicts || []).filter(c => c.id !== id) }));
+  };
+
+  const removeSecretById = (id: string) => {
+      setChar(prev => ({ ...prev, secrets: (prev.secrets || []).filter(s => s.id !== id) }));
+  };
+
+  const updateSecretById = (id: string, field: keyof Secret, val: any) => {
+      const idx = (char.secrets || []).findIndex(s => s.id === id);
+      if (idx === -1) return;
+      
+      const newSecrets = [...(char.secrets || [])];
+      newSecrets[idx] = { ...newSecrets[idx], [field]: val };
+      setChar(prev => ({ ...prev, secrets: newSecrets }));
   };
 
   const handleCardSave = (updatedCard: Card) => {
@@ -193,8 +196,9 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   };
 
   const addSkill = () => {
+      // Use standard card ID generator against card pool to ensure uniqueness
       const newCard: Card = {
-          id: `skill_${Date.now()}`,
+          id: generateCardId(gameState.cardPool),
           name: '新技能',
           description: '',
           itemType: 'skill',
@@ -224,6 +228,36 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   const getAttrValue = (key: string) => {
       const attr = char.attributes[key];
       return attr ? attr.value : 0;
+  };
+
+  const handleReadRawMemory = () => {
+        if (!openWindow) return;
+        
+        // Get full RAW logs for editor view (No decay)
+        const memoryLogs = getAllCharacterLogs(
+            gameState.world.history, 
+            char.id
+        );
+
+        openWindow('reading_mode', {
+            title: `角色原始记忆: ${char.name}`,
+            content: memoryLogs, // Pass LogEntry[] array for nice rendering
+            type: 'history' // Use history renderer
+        });
+    };
+    
+  const handleReadLegacyMemory = () => {
+      if (!openWindow) return;
+      if (!char.previousLifeLogs || char.previousLifeLogs.length === 0) {
+          alert("该角色暂无前世记忆。");
+          return;
+      }
+      
+      openWindow('reading_mode', {
+          title: `[前世] ${char.name} 的旧日记忆`,
+          content: char.previousLifeLogs, // Pass LogEntry[]
+          type: 'history'
+      });
   };
 
   // Image Handling Helpers
@@ -274,6 +308,13 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
   const openImageEditor = (target: 'appearance' | 'description', image: GameImage) => {
       setEditingImage({ target, image });
   };
+  
+  // Life Trajectory Helper
+  const lifeTrajectory = char.lifeTrajectory || { past: "", current: "", future: "" };
+
+  // Filter Conflicts
+  const activeConflicts = (char.conflicts || []).filter(c => !c.solved);
+  const solvedConflicts = (char.conflicts || []).filter(c => c.solved);
 
   const TabButton = ({ id, label, icon: Icon }: { id: typeof activeTab, label: string, icon: any }) => (
       <button 
@@ -285,6 +326,16 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
           <span className="hidden sm:inline text-xs font-bold">{label}</span>
       </button>
   );
+
+  // Helper for safe number input
+  const handleNumericInput = (val: string, callback: (v: number | string) => void) => {
+      if (val === '' || val === '-' || val.endsWith('.') || (val.includes('.') && val.endsWith('0'))) {
+          callback(val);
+      } else {
+          const num = parseFloat(val);
+          callback(isNaN(num) ? val : num);
+      }
+  };
 
   return (
     <Window
@@ -323,6 +374,7 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
             </div>
         }
     >
+        {/* ... (rest of render code unchanged) ... */}
         {editingCard && (
             <CardEditor 
                 initialCard={editingCard.card}
@@ -334,11 +386,121 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
 
         {showContextModal && (
             <ContextEditorModal
-                title={`角色上下文: ${char.name}`}
+                title={`虚拟空间: ${char.name}`}
                 messages={char.contextConfig?.messages || []}
                 onMessagesChange={(msgs) => setChar({...char, contextConfig: { ...char.contextConfig, messages: msgs }})}
                 onClose={() => setShowContextModal(false)}
             />
+        )}
+        
+        {/* Solved Conflicts History Modal */}
+        {showConflictHistory && (
+            <Window
+                title={<span className="flex items-center gap-2"><History size={18}/> 历史矛盾 (已解决)</span>}
+                onClose={() => setShowConflictHistory(false)}
+                maxWidth="max-w-md"
+                height="h-auto max-h-[70vh]"
+                zIndex={200}
+            >
+                <div className="space-y-3 p-4">
+                    {solvedConflicts.length === 0 ? (
+                        <div className="text-center text-muted text-sm italic py-4">暂无已解决的历史矛盾。</div>
+                    ) : (
+                        solvedConflicts.map((conf) => (
+                            <div key={conf.id} className="bg-surface-light border border-success/30 rounded p-3 opacity-80">
+                                <div className="flex justify-between text-xs mb-1">
+                                    <span className="text-muted font-mono">#{conf.id}</span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-success-fg font-mono text-[10px] flex items-center gap-1">
+                                            <CheckCircle size={10}/> 已解决
+                                        </span>
+                                        <button 
+                                            onClick={() => updateConflictById(conf.id, 'solved', false)} // Reopen
+                                            className="text-muted hover:text-warning-fg underline text-[10px]"
+                                        >
+                                            重开
+                                        </button>
+                                        <button 
+                                            onClick={() => removeConflictById(conf.id)} 
+                                            className="text-muted hover:text-danger-fg"
+                                        >
+                                            <Trash size={12}/>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="text-sm text-body line-through decoration-success-fg decoration-2">{conf.desc}</div>
+                            </div>
+                        ))
+                    )}
+                </div>
+            </Window>
+        )}
+
+        {/* Secrets Modal */}
+        {showSecretsModal && (
+             <Window
+                title={<span className="flex items-center gap-2"><Lock size={18}/> 角色秘密 (Secrets)</span>}
+                onClose={() => setShowSecretsModal(false)}
+                maxWidth="max-w-2xl"
+                height="h-[70vh]"
+                zIndex={200}
+                noPadding={true}
+             >
+                 <div className="p-4 flex flex-col gap-4 bg-surface/30">
+                     <p className="text-xs text-muted">这些秘密未解开前不会公开。解开后将自动转化为角色属性。</p>
+                     
+                     <div className="space-y-3">
+                         {(char.secrets || []).length === 0 && <div className="text-center text-muted text-xs italic py-4">暂无秘密。</div>}
+                         {(char.secrets || []).map((secret, idx) => (
+                             <div key={secret.id} className="bg-surface p-3 rounded border border-border">
+                                 <div className="flex justify-between items-center mb-2">
+                                     <div className="flex items-center gap-2">
+                                         {secret.solved ? <Unlock size={14} className="text-success-fg"/> : <Lock size={14} className="text-muted"/>}
+                                         <span className={`text-xs font-bold ${secret.solved ? 'text-success-fg' : 'text-primary'}`}>秘密 #{idx+1}</span>
+                                     </div>
+                                     <button onClick={() => removeSecretById(secret.id)} className="text-muted hover:text-danger-fg"><Trash size={14}/></button>
+                                 </div>
+                                 <div className="grid grid-cols-2 gap-3 mb-2">
+                                     <div>
+                                         <Label>问题</Label>
+                                         <Input 
+                                             value={secret.question} 
+                                             onChange={e => updateSecretById(secret.id, 'question', e.target.value)} 
+                                             className="text-xs"
+                                         />
+                                     </div>
+                                     <div>
+                                         <Label>正确答案</Label>
+                                         <Input 
+                                             value={secret.correctAnswer} 
+                                             onChange={e => updateSecretById(secret.id, 'correctAnswer', e.target.value)} 
+                                             className="text-xs bg-success-base/10 border-success-base/30"
+                                         />
+                                     </div>
+                                 </div>
+                                 <div className="grid grid-cols-2 gap-3">
+                                     <div>
+                                         <Label>错误答案 A</Label>
+                                         <Input 
+                                             value={secret.wrongAnswerA} 
+                                             onChange={e => updateSecretById(secret.id, 'wrongAnswerA', e.target.value)} 
+                                             className="text-xs bg-danger-base/10 border-danger-base/30"
+                                         />
+                                     </div>
+                                     <div>
+                                         <Label>错误答案 B</Label>
+                                         <Input 
+                                             value={secret.wrongAnswerB} 
+                                             onChange={e => updateSecretById(secret.id, 'wrongAnswerB', e.target.value)} 
+                                             className="text-xs bg-danger-base/10 border-danger-base/30"
+                                         />
+                                     </div>
+                                 </div>
+                             </div>
+                         ))}
+                     </div>
+                 </div>
+             </Window>
         )}
 
         {(showImageUpload || editingImage) && (
@@ -405,6 +567,15 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                                 </div>
                                 <Footprints size={16} className={char.isFollowing ? "text-secondary-fg" : "text-faint"}/>
                             </label>
+
+                            <label className="flex items-center gap-2 p-2 rounded bg-surface-highlight border border-border cursor-pointer hover:border-accent-teal">
+                                <input type="checkbox" checked={char.isProfessional || false} onChange={e => setChar({...char, isProfessional: e.target.checked})} />
+                                <div className="flex-1">
+                                    <div className="text-sm font-bold text-accent-teal">专业模式 (Pro)</div>
+                                    <div className="text-[10px] text-muted">专注于解决专业问题</div>
+                                </div>
+                                <Briefcase size={16} className={char.isProfessional ? "text-accent-teal" : "text-faint"}/>
+                            </label>
                         </div>
                     </div>
                     <div className="md:col-span-2 space-y-4 w-full">
@@ -415,7 +586,7 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                             </div>
                             {!isTemplate && (
                                 <div>
-                                    <Label>当前位置 (传送)</Label>
+                                    <Label>所在地</Label>
                                     <select 
                                         className="w-full h-10 bg-surface-light border border-border rounded px-3 text-sm text-body focus:outline-none focus:border-primary"
                                         value={selectedLocationId}
@@ -432,13 +603,13 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                         
                         <div className="flex flex-col w-full">
                             <Label className="flex items-center gap-1 text-secondary-fg justify-between">
-                                <span className="flex items-center gap-1"><VenetianMask size={12}/> 外观描述 (公开可见)</span>
+                                <span className="flex items-center gap-1"><VenetianMask size={12}/> 外观</span>
                             </Label>
                             <TextArea 
                                 rows={4}
                                 value={char.appearance || ""}
                                 onChange={e => setChar({...char, appearance: e.target.value})}
-                                placeholder="描述角色的外貌特征，如身高、体型、衣着、配饰等。场景中所有人可见。"
+                                placeholder="描述角色的气质、体形等，不建议在这里定义服装，这会导致故事中服装被锁死。场景中所有人可见。"
                                 className="border-border bg-surface-highlight w-full resize-y mb-2"
                             />
                             <ImageAttachmentList 
@@ -452,12 +623,12 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                         </div>
 
                         <div className="flex flex-col w-full">
-                            <Label>人设描述 / 个人传记 (私密)</Label>
+                            <Label>自我介绍</Label>
                             <TextArea 
                                 rows={6} 
                                 value={char.description} 
                                 onChange={e => setChar({...char, description: e.target.value})}
-                                placeholder="描述角色的性格、背景故事、私人秘密以及行为逻辑..."
+                                placeholder="第一人称描述角色的性格、背景故事、私人秘密以及行为逻辑..."
                                 className="w-full mb-2"
                             />
                             <ImageAttachmentList 
@@ -470,46 +641,23 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                             />
                         </div>
 
-                        <div className="flex flex-col w-full">
-                            <Label>说话风格 / 试读样本 (Speech Style)</Label>
-                            <TextArea 
-                                rows={3}
-                                value={char.style || ""}
-                                onChange={e => setChar({...char, style: e.target.value})}
-                                placeholder="用于引导AI的说话语气。例如：'杂鱼~杂鱼~竟敢命令我？' 或一段典型的台词。"
-                                className="w-full mb-2 bg-surface-highlight border-border"
-                            />
-                            <p className="text-[10px] text-muted">此内容将引导模型语言风格。</p>
-                        </div>
-                        
-                        <div className="bg-surface-highlight p-3 rounded border border-border flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <Heart size={18} className="text-accent-pink" fill="currentColor"/>
-                                <div>
-                                    <div className="text-sm font-bold text-accent-pink">快感 (Pleasure)</div>
-                                    <div className="text-[10px] text-muted">驱动角色行为的核心动力</div>
-                                </div>
+                        {/* Virtual Space (Replaces Speech Style) */}
+                        <div className="bg-surface-highlight p-3 rounded border border-border">
+                            <div className="flex justify-between items-center mb-2">
+                                <h3 className="text-xs font-bold text-info-fg uppercase flex items-center gap-2">
+                                    <MessageSquare size={14}/> 虚拟空间
+                                </h3>
+                                <Button size="sm" variant="secondary" onClick={() => setShowContextModal(true)}>
+                                    <Edit size={12} className="mr-1"/> 编辑虚拟空间
+                                </Button>
                             </div>
-                            <Input 
-                                type="number" 
-                                className="w-24 text-center font-bold text-accent-pink border-border"
-                                value={getAttrValue('快感') || getAttrValue('pleasure')}
-                                onChange={e => {
-                                    const key = char.attributes['快感'] ? '快感' : 'pleasure';
-                                    const val = Math.round(parseFloat(e.target.value) || 0); 
-                                    if (char.attributes[key]) {
-                                        updateAttr(key, 'value', val);
-                                    } else {
-                                        setChar(prev => ({
-                                            ...prev,
-                                            attributes: {
-                                                ...prev.attributes,
-                                                '快感': { id: '快感', name: '快感', type: AttributeType.NUMBER, value: val, visibility: AttributeVisibility.PUBLIC }
-                                            }
-                                        }));
-                                    }
-                                }}
-                            />
+                            <div className="text-[10px] text-muted leading-relaxed">
+                                {char.contextConfig?.messages?.length > 0 ? (
+                                    <span>包含 {char.contextConfig.messages.length} 条虚拟内容。</span>
+                                ) : (
+                                    <span className="italic">暂无虚拟内容。</span>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -523,25 +671,25 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                         <Button size="sm" variant="secondary" onClick={addAttribute}><Plus size={14} className="mr-1"/> 添加属性</Button>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                        {(Object.values(char.attributes) as GameAttribute[])
-                            .filter(attr => attr.name !== '快感' && attr.name !== 'pleasure') 
-                            .map((attr) => (
-                            <div key={attr.id} className="bg-surface-highlight p-3 rounded border border-border flex flex-col gap-2">
-                                <div className="flex justify-between items-center">
+                        {/* Removed filtering for pleasure/快感 so they appear in this list */}
+                        {(Object.entries(char.attributes) as [string, GameAttribute][])
+                            .map(([key, attr]) => (
+                            <div key={key} className="bg-surface-highlight p-3 rounded border border-border flex flex-col gap-2">
+                                <div className="flex justify-between items-center gap-2">
                                     <Input 
-                                        className="h-7 text-xs w-24 border-transparent bg-transparent font-bold text-primary p-0" 
+                                        className="h-7 text-xs flex-1 border-transparent bg-transparent font-bold text-primary p-0 min-w-0" 
                                         value={attr.name} 
-                                        onChange={e => updateAttr(attr.id, 'name', e.target.value)}
+                                        onChange={e => updateAttr(key, 'name', e.target.value)} 
                                     />
-                                    <div className="flex gap-1">
+                                    <div className="flex gap-1 shrink-0">
                                         <button 
-                                            onClick={() => updateAttr(attr.id, 'visibility', attr.visibility === AttributeVisibility.PUBLIC ? AttributeVisibility.PRIVATE : AttributeVisibility.PUBLIC)}
+                                            onClick={() => updateAttr(key, 'visibility', attr.visibility === AttributeVisibility.PUBLIC ? AttributeVisibility.PRIVATE : AttributeVisibility.PUBLIC)}
                                             className="text-muted hover:text-body p-1"
                                             title={attr.visibility === AttributeVisibility.PUBLIC ? "公开" : "隐藏"}
                                         >
                                             {attr.visibility === AttributeVisibility.PUBLIC ? <Eye size={14}/> : <EyeOff size={14}/>}
                                         </button>
-                                        <button onClick={() => removeAttribute(attr.id)} className="text-muted hover:text-danger-fg p-1"><Trash size={14}/></button>
+                                        <button onClick={() => removeAttribute(key)} className="text-muted hover:text-danger-fg p-1"><Trash size={14}/></button>
                                     </div>
                                 </div>
                                 <div className="flex gap-2 items-center">
@@ -549,10 +697,27 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                                         className="h-8 text-sm" 
                                         value={attr.value} 
                                         onChange={e => {
-                                            const val = attr.type === AttributeType.NUMBER ? (parseFloat(e.target.value) || 0) : e.target.value;
-                                            updateAttr(attr.id, 'value', val);
+                                            const rawVal = e.target.value;
+                                            const numVal = parseFloat(rawVal);
+                                            // Check if input is a valid number format to decide type
+                                            // Must handle integers, decimals, negative signs
+                                            const isNum = !isNaN(numVal) && isFinite(numVal) && rawVal.trim() !== '';
+                                            
+                                            if (isNum) {
+                                                updateAttr(key, 'type', AttributeType.NUMBER);
+                                                // Handle intermediate typing states (e.g. "1." or "-" or "1.0") to prevent cursor jump or input rejection
+                                                if (rawVal.endsWith('.') || rawVal === '-' || (rawVal.includes('.') && rawVal.endsWith('0'))) {
+                                                    updateAttr(key, 'value', rawVal);
+                                                } else {
+                                                    updateAttr(key, 'value', numVal);
+                                                }
+                                            } else {
+                                                // Empty string or text -> TEXT type
+                                                updateAttr(key, 'type', AttributeType.TEXT);
+                                                updateAttr(key, 'value', rawVal);
+                                            }
                                         }}
-                                        type={attr.type === AttributeType.NUMBER ? "number" : "text"}
+                                        placeholder="数值或文本"
                                     />
                                 </div>
                             </div>
@@ -638,7 +803,8 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
 
             {/* BRAIN TAB */}
             {activeTab === 'brain' && (
-                <div className="space-y-6">
+                <div className="space-y-6 pb-10">
+                    
                     {/* AI Config */}
                     <div className="bg-surface-highlight p-4 rounded border border-border">
                         <div className="flex justify-between items-center mb-4">
@@ -782,7 +948,7 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                         )}
                     </div>
 
-                    {/* Drives (Pleasure Sources) */}
+                    {/* Drives (Pleasure Sources) - REFACTORED TO MATCH CONFLICT STYLE */}
                     <div className="bg-surface-highlight p-4 rounded border border-border">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-bold text-accent-pink uppercase flex items-center gap-2">
@@ -792,30 +958,34 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                         </div>
                         <div className="space-y-2">
                             {(char.drives || []).map((drv, idx) => (
-                                <div key={drv.id} className="flex gap-2 items-center">
-                                    <Input 
-                                        className="flex-1 text-xs" 
-                                        value={drv.condition} 
-                                        onChange={e => updateDrive(idx, 'condition', e.target.value)}
-                                        placeholder="条件描述 (如: 探索未知)"
-                                    />
-                                    <div className="flex items-center gap-1 w-20">
-                                        <span className="text-xs text-muted">奖励:</span>
-                                        <Input 
-                                            type="number" className="w-10 text-xs border-pink-900/50 focus:border-pink-500" 
-                                            value={drv.amount} 
-                                            onChange={e => updateDrive(idx, 'amount', parseInt(e.target.value) || 0)}
+                                <div key={drv.id} className="bg-surface border border-accent-pink/30 rounded p-2 flex items-start gap-2">
+                                    <div className="flex-1 space-y-1">
+                                        <TextArea
+                                            className="w-full h-10 text-xs resize-none bg-surface-light border-border focus:border-accent-pink"
+                                            value={drv.condition}
+                                            onChange={e => updateDrive(idx, 'condition', e.target.value)}
+                                            placeholder="条件描述 (如: 探索未知)"
                                         />
+                                        <div className="flex justify-between items-center">
+                                             <div className="flex items-center gap-1 text-[10px] text-muted">
+                                                <span>奖励:</span>
+                                                <Input 
+                                                    type="number" className="w-12 h-6 text-[10px] border-pink-900/50 focus:border-pink-500" 
+                                                    value={drv.amount} 
+                                                    onChange={e => handleNumericInput(e.target.value, (v) => updateDrive(idx, 'amount', v))}
+                                                />
+                                            </div>
+                                            <div className="flex items-center gap-1 text-[10px] text-muted">
+                                                <span>权重:</span>
+                                                <Input 
+                                                    type="number" className="w-12 h-6 text-[10px] border-border focus:border-primary" 
+                                                    value={drv.weight || 50} 
+                                                    onChange={e => handleNumericInput(e.target.value, (v) => updateDrive(idx, 'weight', v))}
+                                                />
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div className="flex items-center gap-1 w-20" title="权重 (决定被选中概率)">
-                                        <span className="text-xs text-muted">权重:</span>
-                                        <Input 
-                                            type="number" className="w-10 text-xs border-border focus:border-primary" 
-                                            value={drv.weight || 50} 
-                                            onChange={e => updateDrive(idx, 'weight', parseInt(e.target.value) || 0)}
-                                        />
-                                    </div>
-                                    <button onClick={() => removeDrive(idx)} className="text-muted hover:text-danger-fg"><Trash size={14}/></button>
+                                    <button onClick={() => removeDrive(idx)} className="text-muted hover:text-danger-fg pt-2"><Trash size={14}/></button>
                                 </div>
                             ))}
                         </div>
@@ -824,90 +994,153 @@ export const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, onS
                     {/* Conflicts */}
                     <div className="bg-surface-highlight p-4 rounded border border-border">
                         <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-xs font-bold text-primary uppercase flex items-center gap-2">
-                                <AlertTriangle size={14}/> 内在与外在矛盾 (Conflicts)
+                            <h3 className="text-xs font-bold text-warning-fg uppercase flex items-center gap-2">
+                                <AlertTriangle size={14}/> 内在与外在矛盾 (Active Conflicts)
                             </h3>
-                            <Button size="sm" variant="secondary" onClick={addConflict}><Plus size={12}/></Button>
+                            <div className="flex gap-2">
+                                <Button size="sm" variant="secondary" onClick={() => setShowConflictHistory(true)}>
+                                    <History size={12} className="mr-1"/> 历史 ({solvedConflicts.length})
+                                </Button>
+                                <Button size="sm" variant="secondary" onClick={addConflict}><Plus size={12}/></Button>
+                            </div>
                         </div>
                         <div className="space-y-2">
-                            {(char.conflicts || []).map((conf, idx) => (
-                                <div key={conf.id} className={`flex gap-2 items-start p-2 rounded border ${conf.solved ? 'border-success-base/30 bg-success-base/10 opacity-50' : 'border-warning-base/30 bg-warning-base/10'}`}>
-                                    <div className="text-[10px] font-mono text-muted pt-2 w-6">#{conf.id}</div>
+                            {activeConflicts.length === 0 && <div className="text-xs text-muted italic text-center py-2">暂无活跃矛盾</div>}
+                            {activeConflicts.map((conf) => (
+                                <div key={conf.id} className="bg-surface border border-warning-base/30 rounded p-2 flex items-start gap-2">
                                     <div className="flex-1 space-y-1">
                                         <TextArea 
-                                            className="w-full h-10 text-xs resize-none bg-transparent border-border" 
+                                            className="w-full h-10 text-xs resize-none bg-surface-light border-border focus:border-warning-base" 
                                             value={conf.desc} 
-                                            onChange={e => updateConflict(idx, 'desc', e.target.value)}
+                                            onChange={e => updateConflictById(conf.id, 'desc', e.target.value)}
                                             placeholder="矛盾描述"
                                         />
                                         <div className="flex justify-between items-center">
-                                            <div className="flex items-center gap-2 text-[10px] text-muted">
+                                            <div className="flex items-center gap-1 text-[10px] text-muted">
                                                 <span>奖励(CP/AP):</span>
                                                 <Input 
                                                     type="number" className="w-12 h-6 text-[10px]" 
                                                     value={conf.apReward} 
-                                                    onChange={e => updateConflict(idx, 'apReward', parseInt(e.target.value) || 0)}
+                                                    onChange={e => handleNumericInput(e.target.value, (v) => updateConflictById(conf.id, 'apReward', v))}
                                                 />
                                             </div>
-                                            <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                                            <label className="flex items-center gap-1 text-[10px] cursor-pointer bg-success-base/20 px-2 py-0.5 rounded text-success-fg hover:bg-success-base/30">
                                                 <input 
                                                     type="checkbox" 
                                                     checked={conf.solved} 
-                                                    onChange={e => updateConflict(idx, 'solved', e.target.checked)}
-                                                /> 已解决
+                                                    onChange={e => updateConflictById(conf.id, 'solved', e.target.checked)}
+                                                    className="accent-success-base"
+                                                /> 标记为解决
                                             </label>
                                         </div>
                                     </div>
-                                    <button onClick={() => removeConflict(idx)} className="text-muted hover:text-danger-fg pt-2"><Trash size={14}/></button>
+                                    <button onClick={() => removeConflictById(conf.id)} className="text-muted hover:text-danger-fg pt-2"><Trash size={14}/></button>
                                 </div>
                             ))}
                         </div>
                     </div>
 
-                    {/* Context Engineering */}
+                    {/* Secrets (New Section) */}
                     <div className="bg-surface-highlight p-4 rounded border border-border">
                         <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-xs font-bold text-info-fg uppercase flex items-center gap-2">
-                                <MessageSquare size={14}/> 角色专属上下文 (Context Engineering)
+                            <h3 className="text-xs font-bold text-primary uppercase flex items-center gap-2">
+                                <Lock size={14}/> 角色秘密 (Secrets)
                             </h3>
-                            <Button size="sm" variant="secondary" onClick={() => setShowContextModal(true)}><Edit size={12} className="mr-1"/> 编辑上下文</Button>
+                            <Button size="sm" variant="secondary" onClick={() => setShowSecretsModal(true)}>
+                                <Edit size={12} className="mr-1"/> 查看/编辑 ({char.secrets?.length || 0})
+                            </Button>
                         </div>
-                        
-                        <div className="text-center text-muted text-xs italic py-4 bg-black/10 rounded border border-border/50">
-                            包含 {char.contextConfig?.messages?.length || 0} 条角色专用指令。点击上方按钮进行编辑。
-                        </div>
-                        <p className="text-[10px] text-muted mt-2">
-                            此处定义的消息将作为"长期记忆"或"系统指令"在每次请求时发送给AI。<br/>
-                        </p>
+                        <p className="text-[10px] text-muted">这些秘密由 AI 在反应阶段生成，解开前处于隐藏状态。解开后将转化为角色属性。</p>
                     </div>
 
-                    {/* Memory Viewer */}
-                    {!isTemplate && (
-                        <div className="bg-surface-highlight p-4 rounded border border-border">
-                             <h3 className="text-xs font-bold text-secondary-fg uppercase mb-4 flex items-center gap-2">
-                                <BrainCircuit size={14}/> 角色记忆查看 (Memory Dump)
+                    {/* Life Trajectory Section (Moved here & Resized) */}
+                    <div className="bg-surface-highlight p-4 rounded border border-border">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xs font-bold text-accent-teal uppercase flex items-center gap-2">
+                                <TrendingUp size={14}/> 人生轨迹 (Life Trajectory)
                             </h3>
-                            <TextArea 
-                                readOnly
-                                className="w-full h-48 font-mono text-xs text-muted bg-black/10 border-border resize-none"
-                                value={getCharacterMemory(
-                                    gameState.world.history, 
-                                    char.id, 
-                                    gameState.map.activeLocationId, 
-                                    // Use override or global logic for preview
-                                    char.memoryConfig?.useOverride ? char.memoryConfig.maxMemoryRounds : (gameState.appSettings.maxCharacterMemoryRounds),
-                                    undefined, // No Image Builder
-                                    gameState.appSettings.maxInputTokens,
-                                    gameState.characters, // Pass Chars Map
-                                    gameState.map.locations // Pass Locs Map
-                                )}
-                                placeholder="暂无记忆..."
-                            />
-                            <p className="text-[10px] text-muted mt-2">
-                                这是系统自动提取的、发送给AI作为该角色记忆的历史片段。
-                            </p>
                         </div>
-                    )}
+                        <div className="space-y-4">
+                            <div>
+                                <Label className="text-muted">过去 (Past - Context Only)</Label>
+                                <TextArea 
+                                    className="w-full h-20 text-xs bg-black/10 border-border resize-y"
+                                    value={lifeTrajectory.past}
+                                    onChange={e => setChar(prev => ({ ...prev, lifeTrajectory: { ...lifeTrajectory, past: e.target.value } }))}
+                                    placeholder="描述角色已完成的过去章节..."
+                                />
+                            </div>
+                            <div className="border-l-2 border-primary pl-3">
+                                <Label className="text-primary font-bold">现在 (Current - Active Plot)</Label>
+                                <TextArea 
+                                    className="w-full h-24 text-xs bg-surface border-primary/50 focus:border-primary resize-y"
+                                    value={lifeTrajectory.current}
+                                    onChange={e => setChar(prev => ({ ...prev, lifeTrajectory: { ...lifeTrajectory, current: e.target.value } }))}
+                                    placeholder="描述角色当前正在经历的人生阶段和目标..."
+                                />
+                                <p className="text-[10px] text-muted mt-1">此内容将作为宏观剧情引导注入到行动和结算中。</p>
+                            </div>
+                            <div>
+                                <Label className="text-muted">未来 (Future - Planned)</Label>
+                                <TextArea 
+                                    className="w-full h-20 text-xs bg-black/10 border-border resize-y"
+                                    value={lifeTrajectory.future}
+                                    onChange={e => setChar(prev => ({ ...prev, lifeTrajectory: { ...lifeTrajectory, future: e.target.value } }))}
+                                    placeholder="描述预设的下一章节剧情走向..."
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Memory Viewer - REPLACEMENT */}
+                    <div className="bg-surface-highlight p-4 rounded border border-border flex flex-col gap-2">
+                        <div className="flex justify-between items-center mb-2">
+                             <h3 className="text-xs font-bold text-highlight uppercase flex items-center gap-2">
+                                <BookOpen size={14}/> 记忆回顾 (Memory)
+                             </h3>
+                        </div>
+                        
+                        {/* New Raw Current Memory Button */}
+                        <button 
+                            onClick={handleReadRawMemory}
+                            disabled={!openWindow}
+                            className="w-full bg-surface hover:bg-surface-light border border-border rounded-lg p-3 flex items-center justify-between group transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                             <div className="flex items-center gap-3">
+                                <div className="p-2 rounded-full bg-primary/10 text-primary group-hover:bg-primary/20">
+                                    <BookOpen size={18}/>
+                                </div>
+                                <div className="text-left">
+                                    <div className="text-sm font-bold text-body group-hover:text-highlight">阅读当前记忆 (原始记录)</div>
+                                    <div className="text-[10px] text-muted">查看未经 AI 概括的完整日志</div>
+                                </div>
+                            </div>
+                            <ChevronRight size={16} className="text-muted group-hover:translate-x-1 transition-transform"/>
+                        </button>
+                        
+                        {/* Legacy Memory Button */}
+                        <button 
+                            onClick={handleReadLegacyMemory}
+                            disabled={!openWindow || !char.previousLifeLogs || char.previousLifeLogs.length === 0}
+                            className={`w-full bg-surface hover:bg-surface-light border border-border rounded-lg p-3 flex items-center justify-between group transition-all disabled:opacity-50 disabled:cursor-not-allowed ${(!char.previousLifeLogs || char.previousLifeLogs.length === 0) ? 'opacity-50' : ''}`}
+                        >
+                             <div className="flex items-center gap-3">
+                                <div className="p-2 rounded-full bg-secondary/10 text-secondary-fg group-hover:bg-secondary/20">
+                                    <FileClock size={18}/>
+                                </div>
+                                <div className="text-left">
+                                    <div className="text-sm font-bold text-body group-hover:text-highlight">阅读前世记忆</div>
+                                    <div className="text-[10px] text-muted">
+                                        {char.previousLifeLogs && char.previousLifeLogs.length > 0 
+                                            ? `查看来自旧存档的 ${char.previousLifeLogs.length} 条记录`
+                                            : "暂无前世记忆"}
+                                    </div>
+                                </div>
+                            </div>
+                            <ChevronRight size={16} className="text-muted group-hover:translate-x-1 transition-transform"/>
+                        </button>
+                    </div>
+
                 </div>
             )}
         </div>

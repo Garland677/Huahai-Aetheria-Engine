@@ -18,6 +18,9 @@ import { LetterWindow } from '../Windows/LetterWindow';
 import { ThemeEditorWindow } from '../Windows/ThemeEditorWindow';
 import { LocationEditor } from '../Windows/LocationEditor';
 import { StoryEditWindow } from '../Windows/StoryEditWindow';
+import { PuzzleWindow } from '../Windows/PuzzleWindow'; // New Import
+import { ReadingModeWindow } from '../Windows/ReadingModeWindow'; // New Import
+import { ReviewWindow } from '../Windows/ReviewWindow'; // New Import
 import { propagateCharacterNameChange } from '../../services/characterUtils';
 
 interface WindowManagerProps {
@@ -278,7 +281,7 @@ export const WindowManager: React.FC<WindowManagerProps> = ({
                     onClose={() => closeWindow(win.id)} 
                     onSave={handleSaveCharacter} 
                     onUpdatePoolCard={handleSaveCard}
-                    // Window component handles zIndex via prop internally if needed, but CharacterEditor sets it on Window
+                    openWindow={openWindow}
                   />
               )}
               {win.type === 'card' && (
@@ -323,7 +326,6 @@ export const WindowManager: React.FC<WindowManagerProps> = ({
                     onSaveCard={handleSaveCard}
                   />
               )}
-              {/* Redirect old types to new WorldCompositionWindow */}
               {(win.type === 'char_pool' || win.type === 'location_pool' || win.type === 'world_composition' as any) && (
                   <WorldCompositionWindow 
                     winId={win.id} 
@@ -333,7 +335,7 @@ export const WindowManager: React.FC<WindowManagerProps> = ({
                     openWindow={openWindow}
                     addLog={addLog}
                     addDebugLog={addDebugLog} 
-                    data={win.data} // Correctly pass data (e.g. targetCardId)
+                    data={win.data} 
                   />
               )}
               {win.type === 'char_gen' && (
@@ -409,6 +411,33 @@ export const WindowManager: React.FC<WindowManagerProps> = ({
                     state={state}
                     updateState={updateState}
                     closeWindow={closeWindow}
+                  />
+              )}
+              {win.type === 'puzzle' && (
+                  <PuzzleWindow 
+                    winId={win.id}
+                    state={state}
+                    updateState={updateState}
+                    closeWindow={closeWindow}
+                    addLog={addLog}
+                  />
+              )}
+              {win.type === 'reading_mode' && (
+                  <ReadingModeWindow 
+                    winId={win.id}
+                    state={state}
+                    closeWindow={closeWindow}
+                    openWindow={openWindow}
+                    data={win.data}
+                  />
+              )}
+              {win.type === 'review' && (
+                  <ReviewWindow 
+                    winId={win.id}
+                    state={state}
+                    updateState={updateState}
+                    closeWindow={closeWindow}
+                    data={win.data}
                   />
               )}
           </div>

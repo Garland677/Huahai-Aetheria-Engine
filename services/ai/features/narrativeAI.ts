@@ -1,126 +1,127 @@
 
-import { Character, LogEntry, GameAttribute, Card, AppSettings, DefaultSettings, MapLocation, MapRegion, GameState, AIConfig, DebugLog } from "../../../types";
-import { createClient, robustGenerate, supportsJsonMode, dispatchAIStatus } from "../core";
-import { buildContextMessages, fillPrompt, replaceGlobalVariables, parsePromptStructure } from "../promptUtils";
-import { getGlobalMemory, getCharacterMemory } from "../memoryUtils";
+
+import { Character, LogEntry, GameAttribute, Card, AppSettings, DefaultSettings, MapLocation, MapRegion, GameState, AIConfig, DebugLog, StoryTag, Trigger } from "../../../types";
+import { createClient, robustGenerate, supportsJsonMode } from "../core";
+import { buildContextMessages, parsePromptStructure, replaceGlobalVariables } from "../promptUtils";
 import { DEFAULT_AI_CONFIG } from "../../../config";
-import { formatCharacterPersona, formatLocationInfo, formatOtherCharacters, filterWorldAttributes, formatRegionConflicts } from "../../contextUtils";
 import { ImageContextBuilder } from "../ImageContextBuilder";
+import { processMacros, MacroContext } from "../../macroService";
+import { formatCharacterSecrets } from "../../contextUtils";
+import { evaluateTriggers } from "../../triggerService";
 
 export const generateObservation = async (
     char: Character,
     query: string,
     history: LogEntry[],
     worldAttributes: Record<string, GameAttribute>,
-    otherChars: Character[],
     globalContextConfig: any,
     cardPool: Card[],
     appSettings: AppSettings,
     defaultSettings: DefaultSettings,
     currentLocation?: MapLocation,
-    nearbyContext?: string,
     knownRegions?: Record<string, MapRegion>,
     onDebug?: (log: DebugLog) => void,
-    fullGameState?: GameState
+    fullGameState?: GameState,
+    onLog?: (msg: string) => void,
+    onTriggerUpdate?: (id: string, updates: Partial<Trigger>) => void
 ): Promise<string> => {
-    // Determine AI Config: Priority: Char Override > Global Behavior/Judge
-    // Observations are essentially "actions" or "reactions" so Behavior is appropriate if overridden
+    // Priority: Char Override > Global Behavior > Global Judge
+    // Updated: Uses charBehaviorConfig (Character Behavior AI) as primary fallback
     const finalConfig = (char.useAiOverride && char.aiConfig?.provider)
         ? char.aiConfig
-        : (fullGameState?.judgeConfig || DEFAULT_AI_CONFIG);
+        : (fullGameState?.charBehaviorConfig || fullGameState?.judgeConfig || DEFAULT_AI_CONFIG);
 
-    const client = createClient(finalConfig, appSettings.apiKeys);
-
-    // Initialize Image Context Builder
+    const client = createClient(finalConfig, appSettings.apiKeys, appSettings.customEndpoints);
+    
+    // Resolve custom endpoint config if applicable
+    let customEndpointConfig = undefined;
+    if (finalConfig.provider === 'custom' && finalConfig.customEndpointId) {
+        customEndpointConfig = appSettings.customEndpoints.find(e => e.id === finalConfig.customEndpointId);
+    }
+    
     const imageBuilder = new ImageContextBuilder();
 
-    // Determine Memory Rounds
-    const isEnv = char.id.startsWith('env_');
-    let capacity = appSettings.maxCharacterMemoryRounds;
-    if (char.memoryConfig?.useOverride) {
-        capacity = char.memoryConfig.maxMemoryRounds;
-    } else if (isEnv) {
-        capacity = appSettings.maxEnvMemoryRounds ?? 5;
-    }
+    const gameStateForMacro = fullGameState || {
+        world: { attributes: worldAttributes, history: history, worldGuidance: "" },
+        map: { 
+            locations: currentLocation ? { [currentLocation.id]: currentLocation } : {}, 
+            regions: knownRegions || {}, 
+            charPositions: {}, 
+            activeLocationId: currentLocation?.id 
+        },
+        characters: { [char.id]: char },
+        round: { roundNumber: 1, activeCharId: char.id },
+        appSettings: appSettings,
+        defaultSettings: defaultSettings,
+        cardPool: cardPool
+    } as unknown as GameState;
 
-    // Filtered Pools, Memory and Conflicts
-    const locationId = fullGameState?.map.charPositions[char.id]?.locationId;
-    const memoryStr = getCharacterMemory(
-        history, 
-        char.id, 
-        locationId, 
-        capacity, 
-        imageBuilder, 
-        appSettings.maxInputTokens,
-        fullGameState?.characters, // Pass maps
-        fullGameState?.map.locations
-    );
-    
-    let regionConflicts = "(无区域数据)";
+    const ctx: MacroContext = {
+        gameState: gameStateForMacro,
+        activeCharId: char.id,
+        activeLocationId: currentLocation?.id,
+        imageBuilder: imageBuilder,
+        aiConfig: finalConfig,
+        onDebug: onDebug,
+        dynamicParams: {
+            query: query,
+            // secretContext removed; rely on {{SCENE_SECRETS}} in prompt
+        }
+    };
+
+    let prompt = processMacros(defaultSettings.prompts.observation, ctx);
+
+    // --- TRIGGER EVALUATION (New) ---
     if (fullGameState) {
-        const regionId = locationId ? fullGameState.map.locations[locationId]?.regionId : undefined;
-        regionConflicts = formatRegionConflicts(
-            locationId,
-            regionId,
-            fullGameState.characters,
-            fullGameState.map.locations,
-            fullGameState.map.charPositions
-        );
+        const { promptSuffix, logs } = evaluateTriggers(fullGameState, 'observation', onTriggerUpdate, char.id);
+        prompt += promptSuffix;
+        // Inject logs if any
+        if (logs.length > 0 && onLog) {
+            logs.forEach(log => onLog(log.content));
+        }
     }
-
-    const worldGuidance = fullGameState?.world?.worldGuidance || "";
-
-    const prompt = fillPrompt(defaultSettings.prompts.observation, {
-        QUERY: query,
-        SPECIFIC_CONTEXT: formatCharacterPersona(char, imageBuilder),
-        LOCATION_CONTEXT: formatLocationInfo(currentLocation, imageBuilder),
-        NEARBY_CONTEXT: nearbyContext || "未知",
-        OTHERS_CONTEXT: formatOtherCharacters(char.id, otherChars, locationId, cardPool, imageBuilder),
-        HISTORY_CONTEXT: memoryStr,
-        WORLD_STATE: JSON.stringify(filterWorldAttributes(worldAttributes), null, 2),
-        REGION_CONFLICT: regionConflicts,
-        WORLD_GUIDANCE: worldGuidance
-    }, appSettings);
 
     const promptParts = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
     const messages = buildContextMessages(globalContextConfig, finalConfig.contextConfig, char.contextConfig, promptParts, appSettings);
 
-    const requestId = `obs_${char.id}_${Date.now()}`;
-    
-    try {
-        dispatchAIStatus(requestId, 'blue'); // Visualizer Start (Processing)
-        
-        // No JSON Mode enforcement, we want pure text
-        const result = await client.models.generateContent({
+    const genConfig = {
+        maxOutputTokens: appSettings.maxOutputTokens,
+        responseMimeType: supportsJsonMode(finalConfig.provider, customEndpointConfig) ? 'application/json' : undefined
+    };
+
+    const result = await robustGenerate<{ content: string }>(
+        () => client.models.generateContent({
             model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
             contents: messages,
-            config: { maxOutputTokens: appSettings.maxOutputTokens }
-        });
+            config: genConfig
+        }),
+        (json) => json && typeof json.content === 'string' && json.content.length > 0,
+        3,
+        (error, rawResponse) => {
+            if (onDebug) {
+                onDebug({
+                    id: `debug_obs_fail_${char.name}_${Date.now()}`,
+                    timestamp: Date.now(),
+                    characterName: "System (Observation Failed)",
+                    prompt: JSON.stringify(messages, null, 2),
+                    response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
+                });
+            }
+        },
+        (rawResponse) => {
+            if (onDebug) {
+                onDebug({
+                    id: `debug_obs_${char.name}_${Date.now()}`,
+                    timestamp: Date.now(),
+                    characterName: "System (Observation)",
+                    prompt: JSON.stringify(messages, null, 2),
+                    response: JSON.stringify(rawResponse, null, 2)
+                });
+            }
+        }
+    );
 
-        if (onDebug) {
-            onDebug({
-                id: `debug_obs_${char.name}_${Date.now()}`,
-                timestamp: Date.now(),
-                characterName: "System (Observation)",
-                prompt: JSON.stringify(messages, null, 2),
-                response: result.text
-            });
-        }
-        dispatchAIStatus(requestId, 'green'); // Visualizer Success
-        return result.text;
-    } catch (e: any) {
-        dispatchAIStatus(requestId, 'gray'); // Visualizer Fail
-        if (onDebug) {
-             onDebug({
-                id: `debug_obs_fail_${char.name}_${Date.now()}`,
-                timestamp: Date.now(),
-                characterName: "System (Observation Failed)",
-                prompt: JSON.stringify(messages, null, 2),
-                response: `Error: ${e.message}`
-            });
-        }
-        throw e;
-    }
+    return result ? result.content : "（观测无法聚焦...）";
 };
 
 export const generateUnveil = async (
@@ -132,36 +133,49 @@ export const generateUnveil = async (
     defaultSettings: DefaultSettings,
     globalContextConfig: any,
     onDebug?: (log: DebugLog) => void,
-    playerIntent?: string, // New Optional Param
+    playerIntent?: string,
     fullGameState?: GameState
 ): Promise<{ results: Array<{ charId: string, unveilText: string }> } | null> => {
     const finalConfig = config.provider ? config : DEFAULT_AI_CONFIG;
-    const client = createClient(finalConfig, appSettings.apiKeys);
-
+    const client = createClient(finalConfig, appSettings.apiKeys, appSettings.customEndpoints);
+    
+    // Resolve custom endpoint config if applicable
+    let customEndpointConfig = undefined;
+    if (finalConfig.provider === 'custom' && finalConfig.customEndpointId) {
+        customEndpointConfig = appSettings.customEndpoints.find(e => e.id === finalConfig.customEndpointId);
+    }
+    
     const imageBuilder = new ImageContextBuilder();
 
-    // Short global history for context
-    const currentRound = history.length > 0 ? history[history.length - 1].round : 1;
-    // Inject images
-    const shortHistory = getGlobalMemory(history, currentRound, 5, appSettings.maxInputTokens, imageBuilder);
+    const gameStateForMacro = fullGameState || {
+        world: { attributes: {}, history: history, worldGuidance: "" },
+        map: { locations: {}, regions: {}, charPositions: {} },
+        characters: {},
+        round: { roundNumber: 1 },
+        appSettings: appSettings,
+        defaultSettings: defaultSettings
+    } as unknown as GameState;
 
-    const worldGuidance = fullGameState?.world?.worldGuidance || "";
+    const ctx: MacroContext = {
+        gameState: gameStateForMacro,
+        imageBuilder: imageBuilder,
+        aiConfig: finalConfig,
+        onDebug: onDebug,
+        dynamicParams: {
+            selectedLogs: selectedLogs,
+            targetCharsContext: targetCharsContext,
+            // Short History is handled by macro SHORT_HISTORY using gameState history
+        }
+    };
 
-    let prompt = fillPrompt(defaultSettings.prompts.generateUnveil, {
-        SHORT_HISTORY: shortHistory,
-        SELECTED_LOGS: selectedLogs,
-        TARGET_CHARS: targetCharsContext,
-        WORLD_GUIDANCE: worldGuidance
-    }, appSettings);
+    let prompt = processMacros(defaultSettings.prompts.generateUnveil, ctx);
 
-    // Append Player Intent if present, and process it for global variables
     if (playerIntent && playerIntent.trim()) {
         const processedIntent = replaceGlobalVariables(playerIntent, appSettings);
-        prompt += `\n\n[玩家指定的揭露方向 / Player Specific Request]\n${processedIntent}`;
+        prompt += `\n\n[要求的揭露内容 / Player Specific Request]\n${processedIntent}`;
     }
 
     const promptParts = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
-
     const messages = buildContextMessages(globalContextConfig, finalConfig.contextConfig, undefined, promptParts, appSettings);
 
     const result = await robustGenerate<{ results: Array<{ charId: string, unveilText: string }> }>(
@@ -169,14 +183,13 @@ export const generateUnveil = async (
             model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
             contents: messages,
             config: { 
-                responseMimeType: supportsJsonMode(finalConfig.provider) ? 'application/json' : undefined,
+                responseMimeType: supportsJsonMode(finalConfig.provider, customEndpointConfig) ? 'application/json' : undefined,
                 maxOutputTokens: appSettings.maxOutputTokens
             }
         }),
         (json) => json && Array.isArray(json.results),
         3,
         (error, rawResponse) => {
-            // Failure Callback
             if (onDebug) {
                 onDebug({
                     id: `debug_unveil_fail_${Date.now()}`,
@@ -186,18 +199,101 @@ export const generateUnveil = async (
                     response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
                 });
             }
+        },
+        (rawResponse) => {
+            if (onDebug) {
+                onDebug({
+                    id: `debug_unveil_${Date.now()}`,
+                    timestamp: Date.now(),
+                    characterName: "System (Unveil)",
+                    prompt: JSON.stringify(messages, null, 2),
+                    response: JSON.stringify(rawResponse, null, 2)
+                });
+            }
         }
     );
 
-    if (onDebug && result) {
-        onDebug({
-            id: `debug_unveil_${Date.now()}`,
-            timestamp: Date.now(),
-            characterName: "System (Unveil)",
-            prompt: JSON.stringify(messages, null, 2),
-            response: JSON.stringify(result, null, 2)
-        });
+    return result;
+};
+
+export const generateStorySuggest = async (
+    gameState: GameState,
+    onDebug?: (log: DebugLog) => void,
+    onLog?: (msg: string) => void,
+    onTriggerUpdate?: (id: string, updates: Partial<Trigger>) => void
+): Promise<{ funsuggest: string, tagsuggest: string[], comingchar?: string[] } | null> => {
+    const finalConfig = gameState.charGenConfig || gameState.judgeConfig || DEFAULT_AI_CONFIG;
+    const client = createClient(finalConfig, gameState.appSettings.apiKeys, gameState.appSettings.customEndpoints);
+    
+    // Resolve custom endpoint config if applicable
+    let customEndpointConfig = undefined;
+    if (finalConfig.provider === 'custom' && finalConfig.customEndpointId) {
+        customEndpointConfig = gameState.appSettings.customEndpoints.find(e => e.id === finalConfig.customEndpointId);
     }
+
+    const imageBuilder = new ImageContextBuilder();
+
+    // Prepare Secrets Context logic removed.
+    // SCENE_SECRETS macro now handles this automatically based on activeLocationId.
+
+    const ctx: MacroContext = {
+        gameState: gameState,
+        activeLocationId: gameState.map.activeLocationId,
+        imageBuilder: imageBuilder,
+        aiConfig: finalConfig,
+        onDebug: onDebug,
+        dynamicParams: {
+            // secretContext removed; rely on {{SCENE_SECRETS}}
+        }
+    };
+    
+    let prompt = processMacros(gameState.defaultSettings.prompts.storysuggest, ctx);
+
+    // --- TRIGGER EVALUATION ---
+    const { promptSuffix, logs } = evaluateTriggers(gameState, 'storysuggest', onTriggerUpdate);
+    prompt += promptSuffix;
+    if (logs.length > 0 && onLog) {
+        logs.forEach(log => onLog(log.content));
+    }
+
+    const promptParts = parsePromptStructure(prompt, (t) => imageBuilder.interleave(t));
+    const messages = buildContextMessages(gameState.globalContext, finalConfig.contextConfig, undefined, promptParts, gameState.appSettings);
+
+    const result = await robustGenerate<{ funsuggest: string, tagsuggest: string[], comingchar?: string[] }>(
+        () => client.models.generateContent({
+            model: finalConfig.model || DEFAULT_AI_CONFIG.model!,
+            contents: messages,
+            config: { 
+                responseMimeType: supportsJsonMode(finalConfig.provider, customEndpointConfig) ? 'application/json' : undefined,
+                maxOutputTokens: gameState.appSettings.maxOutputTokens
+            }
+        }),
+        (json) => json && (json.funsuggest || (Array.isArray(json.tagsuggest))),
+        3,
+        (error, rawResponse) => {
+             if (onDebug) {
+                onDebug({
+                    id: `debug_suggest_fail_${Date.now()}`,
+                    timestamp: Date.now(),
+                    characterName: "System (Story Suggest Failed)",
+                    prompt: JSON.stringify(messages, null, 2),
+                    response: `Error: ${error.message}\n\nRaw Response:\n${rawResponse || "(No Response)"}`
+                });
+            }
+        },
+        (rawResponse) => {
+            if (onDebug) {
+                let debugContent = JSON.stringify(rawResponse, null, 2);
+                onDebug({
+                    id: `debug_suggest_${Date.now()}`,
+                    timestamp: Date.now(),
+                    characterName: "System (Story Suggest)",
+                    prompt: JSON.stringify(messages, null, 2),
+                    response: debugContent
+                });
+            }
+        }
+    );
 
     return result;
 };

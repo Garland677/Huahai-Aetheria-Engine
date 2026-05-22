@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from './Button';
 import { Upload, Grid, Image as ImageIcon, Check, Pencil, Eraser, Trash2, FolderOpen } from 'lucide-react';
@@ -14,7 +13,7 @@ interface ImageUploaderProps {
 }
 
 // --- Pixel Editor Component (Internal Content) ---
-const PixelEditor: React.FC<{ onSave: (dataUrl: string) => void, onClose: () => void }> = ({ onSave, onClose }) => {
+const PixelEditor: React.FC<{ onSave: (dataUrl: string) => void, onClose: () => void, targetResolution?: number }> = ({ onSave, onClose, targetResolution = 64 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [color, setColor] = useState('#ffffff');
     const [tool, setTool] = useState<'pencil' | 'eraser'>('pencil');
@@ -22,7 +21,6 @@ const PixelEditor: React.FC<{ onSave: (dataUrl: string) => void, onClose: () => 
     const [grid, setGrid] = useState<string[][]>(Array(16).fill(Array(16).fill('transparent')));
     const [isDrawing, setIsDrawing] = useState(false);
 
-    // Initialize grid state independently
     useEffect(() => {
         const newGrid = Array(16).fill(null).map(() => Array(16).fill('transparent'));
         setGrid(newGrid);
@@ -78,16 +76,17 @@ const PixelEditor: React.FC<{ onSave: (dataUrl: string) => void, onClose: () => 
 
     const exportImage = () => {
         const outCanvas = document.createElement('canvas');
-        outCanvas.width = 64;
-        outCanvas.height = 64;
+        outCanvas.width = targetResolution;
+        outCanvas.height = targetResolution;
         const ctx = outCanvas.getContext('2d');
         if (ctx) {
             ctx.imageSmoothingEnabled = false;
+            const scale = targetResolution / 16;
             grid.forEach((row, y) => {
                 row.forEach((col, x) => {
                     if (col !== 'transparent') {
                         ctx.fillStyle = col;
-                        ctx.fillRect(x * 4, y * 4, 4, 4); // Scale 16x16 -> 64x64
+                        ctx.fillRect(x * scale, y * scale, scale, scale); // Scale 16x16 -> targetResolution
                     }
                 });
             });
@@ -176,19 +175,16 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ value, onChange, c
   const [mode, setMode] = useState<'library' | 'draw'>('library');
   const [selectedLibImg, setSelectedLibImg] = useState<LibraryImage | null>(null);
 
-  // Simple in-memory session storage for user created icons
   const [userIcons, setUserIcons] = useState<LibraryImage[]>([]);
 
-  // Check if native chooser override is enabled
   const useNativeChooser = state.appSettings.useNativeChooser || false;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      // Validate Type if using native chooser (since we force generic)
       if (useNativeChooser && !file.type.startsWith('image/')) {
           alert(`文件类型错误 (${file.type})。请选择图片文件。`);
-          e.target.value = ''; // Reset input
+          e.target.value = '';
           return;
       }
       processFile(file);
@@ -228,10 +224,6 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ value, onChange, c
   return (
     <div className={`relative flex gap-4 items-center ${className}`}>
       
-      {/* Hidden File Input */}
-      {/* Key forces remount when mode changes. 
-          If useNativeChooser is true, we SPREAD an empty object to REMOVE the accept attribute entirely. 
-          Standard behavior preserves accept="image/*". */}
       <input 
         key={useNativeChooser ? 'native-chooser-mode' : 'standard-mode'}
         type="file" 
@@ -278,7 +270,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ value, onChange, c
             size="sm"
             onClick={() => {
                 if (fileInputRef.current) {
-                    fileInputRef.current.value = ''; // Reset allows selecting same file again
+                    fileInputRef.current.value = '';
                     fileInputRef.current.click();
                 }
             }}
@@ -289,14 +281,13 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ value, onChange, c
           </Button>
       </div>
 
-      {/* Library Modal using Window */}
       {showLibrary && (
           <Window
               title={<span className="flex items-center gap-2"><ImageIcon size={18}/> 图标库 (Icon Library)</span>}
               onClose={() => setShowLibrary(false)}
               maxWidth="max-w-2xl"
               height="h-[600px] max-h-[90vh]"
-              zIndex={200} // High Z-Index to overlap other windows
+              zIndex={200} 
               noPadding={true}
               headerActions={
                   <div className="flex bg-surface-highlight rounded p-0.5 border border-border shrink-0">
@@ -367,7 +358,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ value, onChange, c
                       </div>
                   ) : (
                       <div className="h-full flex items-center justify-center">
-                          <PixelEditor onSave={handleSaveDrawing} onClose={() => setMode('library')} />
+                          <PixelEditor onSave={handleSaveDrawing} onClose={() => setMode('library')} targetResolution={32} />
                       </div>
                   )}
               </div>

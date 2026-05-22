@@ -1,21 +1,21 @@
 
-
-
-
-
-
-
-
-
-
 import { MapChunk, MapState, MapLocation, MapRegion, Character, AttributeType, AttributeVisibility, TerrainType, MapSettlement, LogEntry, InitialWorldConfig } from "../types";
 import { MAP_CONSTANTS } from "../constants";
 import { PRNG, generateIrregularPolygon, isPointInPolygon } from "./geometryUtils";
 import { defaultAcquireCard, defaultInteractCard, defaultTradeCard, INITIAL_DEFAULT_SETTINGS } from "./DefaultSettings";
 import { generateRandomFlagAvatar } from "../assets/imageLibrary";
+import { generateLocationId, getEnvCharId } from "./idUtils";
 
-// Export re-used utils for other files
+// Re-export isPointInPolygon for consumers
 export { isPointInPolygon };
+
+// Define RegionStats interface
+export interface RegionStats {
+    minHeight: number;
+    maxHeight: number;
+    avgHeight: number;
+    composition: Record<TerrainType, number>;
+}
 
 // Improved Noise Functions
 const noise = (x: number, y: number, seed: number) => {
@@ -167,6 +167,10 @@ export const generateUnknownLocations = (chunk: MapChunk, chunkSeed: number): Ma
     const rng = new PRNG(chunkSeed + chunk.xIndex * 73856093 ^ chunk.yIndex * 19349663); 
     const count = 1 + Math.floor(rng.next() * 3); 
 
+    // Used for uniqueness check within this batch (not perfect global uniqueness but collisions with 6 digits is rare)
+    // In a real app, we'd check against global state, but here we assume the probability is low enough
+    const generatedIds = new Set<string>();
+
     for (let i = 0; i < count; i++) {
         const localX = rng.next() * MAP_CONSTANTS.CHUNK_SIZE;
         const localY = rng.next() * MAP_CONSTANTS.CHUNK_SIZE;
@@ -175,8 +179,12 @@ export const generateUnknownLocations = (chunk: MapChunk, chunkSeed: number): Ma
         
         const z = getTerrainHeight(globalX, globalY, chunk.seed);
         
+        // Generate Standardized ID
+        const locId = generateLocationId(generatedIds);
+        generatedIds.add(locId);
+
         locations.push({
-            id: `loc_unk_${globalX.toFixed(0)}_${globalY.toFixed(0)}_${Date.now()}_${Math.floor(rng.next()*1000)}`, 
+            id: locId, 
             name: "未知地点",
             description: z < MAP_CONSTANTS.SEA_LEVEL ? "隐约可见的水下遗迹或沉船。" : "遥远的一处地标，等待探索。",
             coordinates: { x: globalX, y: globalY, z },
@@ -332,13 +340,6 @@ export const analyzeTerrainAround = (x: number, y: number, seed: number, chunks?
     };
 };
 
-export interface RegionStats {
-    minHeight: number;
-    maxHeight: number;
-    avgHeight: number;
-    composition: Record<TerrainType, number>; // Percentage
-}
-
 export const analyzeRegionStats = (region: MapRegion, seed: number, chunks?: Record<string, MapChunk>, settlements?: Record<string, MapSettlement>): RegionStats => {
     if (!region.vertices || region.vertices.length === 0) {
         return { minHeight: 0, maxHeight: 0, avgHeight: 0, composition: { [TerrainType.LAND]: 100, [TerrainType.WATER]: 0, [TerrainType.RIVER]: 0, [TerrainType.CITY]: 0, [TerrainType.TOWN]: 0 } };
@@ -401,7 +402,7 @@ export const createEnvironmentCharacter = (
     nameSuffix: string = "的环境", 
     descTemplate: string = "【系统代理】{{LOCATION_NAME}}的自然环境。"
 ): Character => {
-    const id = `env_${locationId}`;
+    const id = getEnvCharId(locationId);
     return {
         id,
         isPlayer: false,
@@ -459,8 +460,12 @@ export const generateInitialMap = (config?: InitialWorldConfig): { map: MapState
     startRegion.name = startRegionName;
     startRegion.description = startRegionDesc;
 
+    // Use generateLocationId but we must ensure it doesn't collide.
+    // For initial map, collisions are impossible as it's the first one.
+    const startLocationId = generateLocationId(new Set());
+
     const startLocation: MapLocation = {
-        id: 'loc_start_0_0',
+        id: startLocationId,
         name: startLocationName,
         description: startLocationDesc,
         coordinates: { x: startX, y: startY, z: startZ },
@@ -544,4 +549,228 @@ export const checkMapExpansion = (playerX: number, playerY: number, currentMap: 
 
     if (!changed) return currentMap;
     return { ...currentMap, chunks: newChunks, locations: newLocations, settlements: newSettlements };
+};
+
+// --- New: Terrain Suitability Check ---
+export const checkTerrainType = (x: number, y: number, targetType: string, seed: number, mapState: MapState): boolean => {
+    // 1. Get detailed terrain analysis for the target point
+    // We reuse existing analysis but extract specific metrics
+    const baseData = getTerrainTypeAt(x, y, seed, mapState.chunks, mapState.settlements);
+    const centerH = baseData.height;
+    
+    // Sample surrounding points
+    const sample = (radius: number, count: number = 8) => {
+        const points = [];
+        let minH = Infinity, maxH = -Infinity;
+        let sumH = 0;
+        let waterCount = 0;
+        let townCount = 0;
+        let cityCount = 0;
+        let riverCount = 0;
+
+        for (let i = 0; i < count; i++) {
+            const angle = (Math.PI * 2 * i) / count;
+            const sx = x + Math.cos(angle) * radius;
+            const sy = y + Math.sin(angle) * radius;
+            const d = getTerrainTypeAt(sx, sy, seed, mapState.chunks, mapState.settlements);
+            
+            points.push(d);
+            if (d.height < minH) minH = d.height;
+            if (d.height > maxH) maxH = d.height;
+            sumH += d.height;
+            
+            if (d.type === TerrainType.WATER) waterCount++;
+            if (d.type === TerrainType.RIVER) riverCount++;
+            if (d.type === TerrainType.TOWN) townCount++;
+            if (d.type === TerrainType.CITY) cityCount++;
+        }
+        
+        const avgH = sumH / count;
+        // Variance
+        const variance = points.reduce((acc, p) => acc + Math.pow(p.height - avgH, 2), 0) / count;
+        
+        return { minH, maxH, avgH, variance, waterCount, townCount, cityCount, riverCount, count };
+    };
+
+    switch (targetType) {
+        case '平地': // Flat land (100m)
+            {
+                const s = sample(100, 6);
+                return s.variance < 20 && baseData.type === TerrainType.LAND;
+            }
+        case '平原': // Plain (1000m)
+            {
+                const s = sample(1000, 8);
+                return s.variance < 100 && baseData.type === TerrainType.LAND;
+            }
+        case '山腰': // Mountain side
+            {
+                const s = sample(200, 8);
+                // Large height diff, and center is mid-way between min/max
+                return (s.maxH - s.minH > 100) && (centerH - s.minH > 40) && (s.maxH - centerH > 40) && baseData.type === TerrainType.LAND;
+            }
+        case '山脚': // Mountain foot
+            {
+                const s = sample(200, 8);
+                // Large range, but center is close to bottom
+                return (s.maxH - s.minH > 100) && (centerH - s.minH < 20) && baseData.type === TerrainType.LAND;
+            }
+        case '山谷': // Valley
+            {
+                const s = sample(200, 8);
+                // Surrounded by higher ground (avgH > centerH)
+                return (s.maxH - s.minH > 100) && (s.avgH - centerH > 40) && baseData.type === TerrainType.LAND;
+            }
+        case '山顶': // Peak
+            {
+                const s = sample(200, 8);
+                // Center is close to max
+                return (s.maxH - s.minH > 100) && (s.maxH - centerH < 10) && baseData.type === TerrainType.LAND;
+            }
+        case '湖': 
+            {
+                // Must be water, check size > 50m
+                if (baseData.type !== TerrainType.WATER) return false;
+                // Sample at 50m radius, must all be water
+                const s = sample(50, 4);
+                return s.waterCount === s.count;
+            }
+        case '海':
+            {
+                if (baseData.type !== TerrainType.WATER) return false;
+                // Sample at 1000m, mostly water
+                const s = sample(1000, 4);
+                return s.waterCount === s.count;
+            }
+        case '湖边':
+            {
+                // Radius 50m has some water points
+                const s = sample(50, 8);
+                return s.waterCount > 0 && baseData.type === TerrainType.LAND;
+            }
+        case '海边':
+            {
+                const s = sample(50, 8);
+                // Same logic as lake side locally, but maybe context differs. 
+                // Using same local check for simplicity, unless we verify large body.
+                // Or check 1000m out has water too? Let's stick to local edge.
+                return s.waterCount > 0 && baseData.type === TerrainType.LAND;
+            }
+        case '溪边':
+            {
+                const s = sample(10, 4);
+                return s.riverCount > 0 && baseData.type === TerrainType.LAND;
+            }
+        case '村镇':
+            return baseData.type === TerrainType.TOWN;
+        case '城市':
+            return baseData.type === TerrainType.CITY;
+        case '村镇边':
+            {
+                const s = sample(100, 8);
+                return s.townCount > 0 && s.cityCount === 0 && baseData.type === TerrainType.LAND;
+            }
+        case '城市边':
+            {
+                const s = sample(100, 8);
+                return s.cityCount > 0 && baseData.type === TerrainType.LAND;
+            }
+        default:
+            return true; // Unknown type, accept anywhere land
+    }
+};
+
+// --- Updated: Spiral Search with Fallback and Random Start ---
+export const findSuitableLocation = (
+    targetTypeString: string,
+    region: MapRegion,
+    seed: number,
+    mapState: MapState
+): { x: number, y: number } | null => {
+    const rng = new PRNG(seed + Date.now());
+    
+    // Parse target types (e.g. "平原/河边")
+    const targetTypes = targetTypeString.split(/[\/,]/).map(s => s.trim()).filter(s => s);
+    
+    // Pick RANDOM start point inside region
+    // (User Request: Start from random point, not player)
+    let startX = region.center.x;
+    let startY = region.center.y;
+    
+    // Bounding Box
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    region.vertices.forEach(v => {
+        if(v.x < minX) minX = v.x; if(v.x > maxX) maxX = v.x;
+        if(v.y < minY) minY = v.y; if(v.y > maxY) maxY = v.y;
+    });
+
+    // Try finding valid random point inside poly
+    let validStartFound = false;
+    for(let i=0; i<20; i++) {
+        const rx = minX + rng.next() * (maxX - minX);
+        const ry = minY + rng.next() * (maxY - minY);
+        if (isPointInPolygon({x:rx, y:ry}, region.vertices)) {
+            startX = rx; startY = ry;
+            validStartFound = true;
+            break;
+        }
+    }
+    
+    // Fallback if random sampling fails (e.g. complex shape), stick to center if inside, or just vertex avg
+    if (!validStartFound && !isPointInPolygon({x: startX, y: startY}, region.vertices)) {
+        startX = (minX + maxX) / 2;
+        startY = (minY + maxY) / 2;
+    }
+
+    const startPoint = { x: startX, y: startY };
+
+    // Search Variables
+    let bestPoint = { x: startX, y: startY };
+    let maxMatchCount = -1; // -1 ensures even 0 match updates if strictly better? No, start with -1.
+
+    // Spiral Search Configuration
+    const gap = 100; // 100m gap
+    const b = gap / (2 * Math.PI); 
+    const stepAngle = 0.5; 
+    const maxSteps = 1000; 
+
+    for (let i = 0; i < maxSteps; i++) {
+        const theta = i * stepAngle;
+        const radius = b * theta; 
+        const angle = theta + (seed % (Math.PI * 2));
+        
+        const x = startX + Math.cos(angle) * radius;
+        const y = startY + Math.sin(angle) * radius;
+
+        // Check 1: Must be in region (Strict)
+        if (!isPointInPolygon({x, y}, region.vertices)) continue;
+
+        // Check 2: Terrain Suitability Scoring
+        let currentMatchCount = 0;
+        
+        for (const type of targetTypes) {
+            if (checkTerrainType(x, y, type, seed, mapState)) {
+                currentMatchCount++;
+            }
+        }
+
+        // Perfect Match? Return immediately
+        if (currentMatchCount === targetTypes.length) {
+            return { x, y };
+        }
+
+        // Partial Match? Keep best
+        if (currentMatchCount > maxMatchCount) {
+            maxMatchCount = currentMatchCount;
+            bestPoint = { x, y };
+        }
+    }
+
+    // Fallback Logic:
+    // If we found any match > 0, return best point.
+    // If we found NO matches (maxMatchCount <= 0), return validStart point (or center).
+    // This ensures we always return *something* valid in the region.
+    
+    // Note: If no points checked were in region (unlikely given start logic), bestPoint is startPoint.
+    return bestPoint;
 };

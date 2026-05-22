@@ -22,6 +22,10 @@ export class MapRenderer {
     private visualGrid: VisualGridPoint[] = [];
     private lastChunks: Record<string, MapChunk> = {};
     private lastSettlementsHash: string = "";
+    
+    // Memory Optimization: Reuse queues to avoid GC churn
+    private worldQueue: RenderObject[] = [];
+    private overlayQueue: RenderObject[] = [];
 
     cacheGrid(state: GameState) {
         const currentChunks = state.map.chunks;
@@ -126,8 +130,12 @@ export class MapRenderer {
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, width, height);
 
-        const worldQueue: RenderObject[] = [];
-        const overlayQueue: RenderObject[] = [];
+        // Reuse arrays
+        this.worldQueue.length = 0;
+        this.overlayQueue.length = 0;
+        const worldQueue = this.worldQueue;
+        const overlayQueue = this.overlayQueue;
+
         const regions = Object.values(state.map.regions || {}) as MapRegion[];
         
         // Culling bounds
@@ -308,6 +316,7 @@ export class MapRenderer {
         });
 
         // 6. Sort and Draw
+        // Reuse sort function to avoid closure allocation if possible, but inline is fine for V8
         worldQueue.sort((a, b) => b.depth - a.depth);
         overlayQueue.sort((a, b) => b.depth - a.depth);
 
@@ -332,14 +341,12 @@ export class MapRenderer {
                     ctx.arc(pGround.x, pGround.y, 2.5, 0, Math.PI * 2);
                     ctx.fillStyle = '#0ea5e9'; // Sky-500
                     ctx.fill();
-                    // Dot Glow
-                    ctx.shadowBlur = 4;
-                    ctx.shadowColor = '#0ea5e9';
+                    
+                    // Dot Glow - REMOVED SHADOW FOR PERFORMANCE
                     ctx.fillStyle = '#bae6fd'; // Sky-200 center
                     ctx.beginPath();
                     ctx.arc(pGround.x, pGround.y, 1, 0, Math.PI * 2);
                     ctx.fill();
-                    ctx.shadowBlur = 0;
                 }
             } else if (obj.type === 'location') {
                 // Icon Circle
@@ -422,7 +429,10 @@ export class MapRenderer {
             }
         };
 
-        worldQueue.forEach(draw);
-        overlayQueue.forEach(draw);
+        const wLen = worldQueue.length;
+        for (let i = 0; i < wLen; i++) draw(worldQueue[i]);
+        
+        const oLen = overlayQueue.length;
+        for (let i = 0; i < oLen; i++) draw(overlayQueue[i]);
     }
 }

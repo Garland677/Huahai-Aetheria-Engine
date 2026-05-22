@@ -91,19 +91,12 @@ export const StoryEditWindow: React.FC<StoryEditWindowProps> = ({ winId, state, 
     };
 
     const handleJump = (rNum: number) => {
+        // Dispatch Custom Event to ReadingModeWindow
+        const event = new CustomEvent('reading_jump_to_round', { 
+            detail: { round: rNum } 
+        });
+        window.dispatchEvent(event);
         closeWindow(winId);
-        // Defer scroll to allow window close render cycle
-        setTimeout(() => {
-            const el = document.getElementById(`round-start-${rNum}`);
-            if (el) {
-                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            } else {
-                // Fallback: try finding first log of that round
-                // We don't have log ID here easily without scanning logs again, 
-                // but StoryLog uses stable IDs if generated correctly.
-                // Assuming StoryLog generates `round-start-X` for system logs.
-            }
-        }, 100);
     };
 
     const handleDelete = () => {
@@ -192,7 +185,8 @@ export const StoryEditWindow: React.FC<StoryEditWindowProps> = ({ winId, state, 
             onClose={() => closeWindow(winId)}
             maxWidth="max-w-4xl"
             height="h-[80vh]"
-            zIndex={200}
+            // Updated Z-Index to be higher than ReadingMode (250) so it appears on top
+            zIndex={300}
             noPadding={true}
             disableContentScroll={true}
             footer={

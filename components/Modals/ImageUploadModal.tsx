@@ -1,12 +1,13 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Button, Input, Label } from '../ui/Button';
+import { Button, Input, Label, TextArea } from '../ui/Button';
 import { X, Upload, Check, Loader2, Image as ImageIcon, Trash2, Crop, Maximize2, Zap, Grid, RefreshCw, RotateCcw } from 'lucide-react';
 import { processImage } from '../../services/imageUtils';
 import { GameImage, ImageSettings } from '../../types';
 import { useGame } from '../../hooks/useGame';
 import { IconLibraryWindow } from '../Windows/IconLibraryWindow';
+import { imageStorage } from '../../services/imageStorage';
 
 interface ImageUploadModalProps {
     onClose: () => void;
@@ -18,7 +19,7 @@ interface ImageUploadModalProps {
 const DEFAULT_SETTINGS: ImageSettings = {
     maxShortEdge: 896,
     maxLongEdge: 4480,
-    compressionQuality: 0.8
+    compressionQuality: 0.95
 };
 
 interface Rect {
@@ -31,7 +32,6 @@ interface Rect {
 export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onConfirm, initialImage, initialUrl }) => {
     const game = useGame();
     const imageSettings = game.state.appSettings.imageSettings || DEFAULT_SETTINGS;
-    // Get Native Chooser setting
     const useNativeChooser = game.state.appSettings.useNativeChooser || false;
 
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -39,7 +39,8 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
     const imgRef = useRef<HTMLImageElement>(null);
     const lastTouchDistance = useRef<number | null>(null);
 
-    // Initialize source and preview. Source keeps the original full-res data.
+    // If initialImage exists, check if it's a blob url or needs fetching. 
+    // Usually standard `<img>` handles blob urls.
     const [sourceUrl, setSourceUrl] = useState<string | null>(initialImage?.base64 || initialUrl || null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(initialImage?.base64 || initialUrl || null);
     
@@ -47,10 +48,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     
-    // High Quality Toggle (Default: Off to save tokens)
     const [isHighQualityMode, setIsHighQualityMode] = useState(false);
-
-    // Library State
     const [showLibrary, setShowLibrary] = useState(false);
 
     // View State
@@ -62,23 +60,18 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
     // Crop Mode State
     const [isCropping, setIsCropping] = useState(false);
     const [pendingCropStart, setPendingCropStart] = useState(false);
-    const [aspectRatio, setAspectRatio] = useState<number | null>(null); // null = Free
+    const [aspectRatio, setAspectRatio] = useState<number | null>(null); 
     
-    // Coordinates relative to the container-left-top
     const [cropRect, setCropRect] = useState<Rect>({ x: 0, y: 0, w: 0, h: 0 });
-    const [imgRect, setImgRect] = useState<Rect>({ x: 0, y: 0, w: 0, h: 0 }); // Cached displayed image rect
+    const [imgRect, setImgRect] = useState<Rect>({ x: 0, y: 0, w: 0, h: 0 }); 
     
-    // Resize State
     const [isResizing, setIsResizing] = useState(false);
     const resizeStart = useRef({ startX: 0, startY: 0, startRect: { x: 0, y: 0, w: 0, h: 0 }, dir: '' });
 
-    // Internal function to calculate current visual rect of image
     const updateImgRect = () => {
         if (!containerRef.current || !imgRef.current) return;
-        
         const imgBounds = imgRef.current.getBoundingClientRect();
         const containerBounds = containerRef.current.getBoundingClientRect();
-
         setImgRect({
             x: imgBounds.left - containerBounds.left,
             y: imgBounds.top - containerBounds.top,
@@ -87,45 +80,34 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
         });
     };
 
-    // Update imgRect whenever view changes
     useEffect(() => {
         updateImgRect();
     }, [scale, position, previewUrl, isCropping]);
 
-    // Internal function to calculate and set initial crop rect based on current view
     const initCropUI = () => {
         if (!containerRef.current || !imgRef.current) return;
-        
-        // 1. Get precise image dimensions on screen
         const imgBounds = imgRef.current.getBoundingClientRect();
         const containerBounds = containerRef.current.getBoundingClientRect();
-
         const currentImgRect = {
             x: imgBounds.left - containerBounds.left,
             y: imgBounds.top - containerBounds.top,
             w: imgBounds.width,
             h: imgBounds.height
         };
-
         setImgRect(currentImgRect);
-        
-        // Initial Crop = Centered square-ish or full image
         const initW = currentImgRect.w * 0.8;
         const initH = currentImgRect.h * 0.8;
-        
         setCropRect({
             x: currentImgRect.x + (currentImgRect.w - initW) / 2,
             y: currentImgRect.y + (currentImgRect.h - initH) / 2,
             w: initW,
             h: initH
         });
-        
-        setAspectRatio(null); // Default to Free
+        setAspectRatio(null); 
         setIsCropping(true);
         setIsDragging(false);
     };
 
-    // Reset view when image loads
     useEffect(() => {
         if (previewUrl && containerRef.current) {
             const img = new Image();
@@ -136,11 +118,8 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                 const fitScale = Math.min(scaleW, scaleH) * 0.9;
                 setScale(fitScale);
                 setPosition({ x: 0, y: 0 });
-                
-                // If we were waiting for the source image to load to start cropping
                 if (pendingCropStart) {
                     setPendingCropStart(false);
-                    // Defer slightly to allow DOM paint/transform update
                     setTimeout(initCropUI, 100);
                 }
             };
@@ -167,39 +146,25 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                 let newW = startRect.w;
                 let newH = startRect.h;
 
-                // --- Aspect Ratio Enforcement Logic ---
-                // If dragging corner AND ratio is set, enforce ratio.
-                // If dragging edge, reset ratio to free.
-                
                 if (aspectRatio !== null && dir.length === 2) {
-                    // Corner drag with locked ratio
-                    // Strategy: Use width change to drive height change, preserving ratio
-                    
                     if (dir.includes('e')) {
                         newW = startRect.w + deltaX;
-                    } else { // west
+                    } else { 
                         newW = startRect.w - deltaX;
                     }
-                    
-                    // Enforce min width first
                     newW = Math.max(20, newW);
-                    
-                    // Calculate H based on ratio
                     newH = newW / aspectRatio;
 
-                    // Re-calculate X/Y based on new dimensions and anchor point
                     if (dir.includes('w')) newX = startRect.x + startRect.w - newW;
-                    else newX = startRect.x; // east anchors left
+                    else newX = startRect.x; 
 
                     if (dir.includes('n')) newY = startRect.y + startRect.h - newH;
-                    else newY = startRect.y; // south anchors top
+                    else newY = startRect.y; 
                     
                 } else {
-                    // Free resize or Edge resize
                     if (dir.length === 1 && aspectRatio !== null) {
-                        setAspectRatio(null); // Unlock ratio on edge drag
+                        setAspectRatio(null); 
                     }
-
                     if (dir.includes('e')) newW = startRect.w + deltaX;
                     if (dir.includes('w')) {
                         newX = startRect.x + deltaX;
@@ -212,7 +177,6 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                     }
                 }
 
-                // Enforce Min Size
                 if (newW < 20) {
                     if (dir.includes('w')) newX = startRect.x + startRect.w - 20;
                     newW = 20;
@@ -259,7 +223,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
         reader.onload = (ev) => {
             const result = ev.target?.result as string;
             setSourceUrl(result);
-            setPreviewUrl(result); // Reset preview to source
+            setPreviewUrl(result); 
             setIsCropping(false);
         };
         reader.readAsDataURL(file);
@@ -309,10 +273,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
     
     const handleTouchMove = (e: React.TouchEvent) => {
         if (isResizing) return;
-        
-        if (e.cancelable && (isDragging || e.touches.length === 2)) {
-            e.preventDefault();
-        }
+        if (e.cancelable && (isDragging || e.touches.length === 2)) e.preventDefault();
 
         if (e.touches.length === 1 && isDragging) {
             setPosition({
@@ -346,7 +307,6 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
             dir
         };
         setIsResizing(true);
-        // Force update imgRect before resize starts to ensure accuracy
         updateImgRect();
     };
 
@@ -354,14 +314,8 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
         const { w: imgW, h: imgH, x: imgX, y: imgY } = imgRect;
         let w = imgW;
         let h = imgH;
-
-        if (imgW / imgH > ratio) {
-            w = imgH * ratio;
-        } else {
-            h = imgW / ratio;
-        }
-
-        // Center the crop box on image
+        if (imgW / imgH > ratio) w = imgH * ratio;
+        else h = imgW / ratio;
         return {
             x: imgX + (imgW - w) / 2,
             y: imgY + (imgH - h) / 2,
@@ -372,10 +326,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
 
     const handleRatioClick = (nominalRatio: number) => {
         if (!isCropping) return;
-        const isImgPortrait = imgRect.w < imgRect.h;
         let targetRatio = nominalRatio;
-        
-        // Toggle orientation if clicking same ratio
         if (aspectRatio !== null && Math.abs(aspectRatio - targetRatio) < 0.01) {
             targetRatio = 1 / targetRatio;
         }
@@ -394,39 +345,24 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
 
     const applyCrop = () => {
         if (!previewUrl || !cropRect.w || !cropRect.h) return;
-        
         const img = new Image();
         img.onload = () => {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
-
-            // Recalculate scale based on current live imgRect
-            // imgRect might have changed due to pan/zoom
-            // NOTE: imgRect is kept up to date by useEffect
-            
             const scaleX = img.width / imgRect.w;
             const scaleY = img.height / imgRect.h;
-
             const cropX = (cropRect.x - imgRect.x) * scaleX;
             const cropY = (cropRect.y - imgRect.y) * scaleY;
             const cropW = cropRect.w * scaleX;
             const cropH = cropRect.h * scaleY;
-
             canvas.width = cropW;
             canvas.height = cropH;
-
-            // Fill black background in case crop goes outside image
             ctx.fillStyle = "black";
             ctx.fillRect(0,0, cropW, cropH);
-
             ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-            
-            // Set preview to the new cropped version
             setPreviewUrl(canvas.toDataURL('image/png'));
             setIsCropping(false);
-            
-            // Reset View
             setScale(1); 
             setPosition({x:0, y:0});
         };
@@ -438,7 +374,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
         setIsProcessing(true);
         setError(null);
         try {
-            const baseShortEdge = imageSettings.maxShortEdge;
+            const baseShortEdge = imageSettings.maxShortEdge ?? 896;
             const effectiveShortEdge = isHighQualityMode ? baseShortEdge : Math.floor(baseShortEdge / 2);
 
             const processSettings = {
@@ -447,13 +383,18 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
             };
 
             const processedBase64 = await processImage(previewUrl, processSettings);
+            
+            // KEY UPDATE: Save to IndexedDB via imageStorage
+            const { url: blobUrl } = await imageStorage.saveImage(processedBase64);
+            
             const finalDesc = description.trim();
             const newImage: GameImage = {
                 id: initialImage?.id || `img_${Date.now()}`,
-                base64: processedBase64, 
-                mimeType: 'image/png', // Always use PNG to support transparency
+                base64: blobUrl, // Store runtime Blob URL here instead of base64
+                mimeType: 'image/png',
                 description: finalDesc
             };
+            
             onConfirm(newImage);
             onClose();
         } catch (err: any) {
@@ -472,9 +413,8 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
         }
     };
 
-    // Library Handler
     const handleLibrarySelect = (url: string) => {
-        setSourceUrl(url); // Update source to lib image
+        setSourceUrl(url); 
         setPreviewUrl(url);
         setShowLibrary(false);
     };
@@ -672,7 +612,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                         />
                     </div>
 
-                    <div className="w-full lg:w-80 flex flex-col gap-4 shrink-0 lg:overflow-y-auto min-h-0 lg:max-h-full pb-4">
+                    <div className="w-full lg:w-96 flex flex-col gap-4 shrink-0 lg:overflow-y-auto min-h-0 lg:max-h-full pb-4">
                         {error && (
                             <div className="text-xs text-danger-fg bg-danger/10 p-3 rounded border border-danger/20 flex items-start gap-2">
                                 <X size={14} className="mt-0.5 shrink-0"/>
@@ -681,19 +621,18 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                         )}
 
                         <div className="bg-surface-light p-4 rounded border border-border flex-1 flex flex-col">
-                            <Label className="text-primary mb-2 block">图片描述 (提示词前缀)</Label>
+                            <Label className="text-primary mb-2 block">图片注释</Label>
                             <div className="relative">
-                                <Input 
+                                <TextArea 
                                     value={description}
                                     onChange={e => setDescription(e.target.value)}
                                     placeholder="例如: 一个拿着红色滑板的机器人..."
-                                    className="text-sm pb-8"
+                                    className="text-sm min-h-[100px]"
                                     autoFocus={!initialImage && !initialUrl} 
                                 />
                             </div>
                             <p className="text-[10px] text-muted mt-2 leading-relaxed">
-                                此描述将作为提示词发送给 AI。<br/>
-                                在保存时，图片将根据全局设置 ({imageSettings.maxShortEdge}px / {imageSettings.maxLongEdge}px) 自动缩放和压缩。
+                                此注释将随图片发送给 AI。<br/>
                             </p>
 
                             <div className="mt-4 pt-3 border-t border-border/50">
@@ -706,12 +645,12 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                                     />
                                     <div className="flex-1">
                                         <div className={`text-xs font-bold transition-colors ${isHighQualityMode ? 'text-primary' : 'text-muted group-hover:text-body'}`}>
-                                            启用高清上传 (High Quality)
+                                            启用全分辨率
                                         </div>
                                         <div className="text-[9px] text-muted mt-0.5">
                                             {isHighQualityMode 
-                                                ? "使用全局设置的完整分辨率 (消耗较多Token)" 
-                                                : "分辨率限制减半 (节省Token, 适合概览图)"}
+                                                ? "使用全局设置的完整分辨率 ，消耗较多Token" 
+                                                : "分辨率限制减半，节省Token"}
                                         </div>
                                     </div>
                                     {isHighQualityMode && <Zap size={14} className="text-primary animate-pulse"/>}
@@ -720,7 +659,7 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({ onClose, onC
                             
                             <div className="mt-4 pt-3 border-t border-border/50">
                                  <Button variant="secondary" onClick={() => setShowLibrary(true)} className="w-full flex items-center justify-center gap-2 text-xs">
-                                     <Grid size={14}/> 打开图标库 / 像素画
+                                     <Grid size={14}/> 打开像素图编辑器
                                  </Button>
                             </div>
                         </div>

@@ -6,6 +6,7 @@ import { X, ShoppingCart, Plus, Coins, Zap, Box, Edit2, Info } from 'lucide-reac
 import { CardEditor } from './CardEditor';
 import { normalizeCard } from '../../services/aiService';
 import { Window } from '../ui/Window';
+import { generateCardId } from '../../services/idUtils';
 
 interface ShopWindowProps {
     winId: number;
@@ -21,7 +22,7 @@ export const ShopWindow: React.FC<ShopWindowProps> = ({ winId, state, updateStat
     const [isCreating, setIsCreating] = useState(false);
     
     // Default system creation cost
-    const defaultCreationCost = state.defaultSettings.gameplay.defaultCreationCost;
+    const defaultCreationCost = state.defaultSettings.gameplay.defaultCreationCost ?? 20;
     const [payAmount, setPayAmount] = useState<number>(defaultCreationCost);
 
     const activeChar = activeCharId ? state.characters[activeCharId] : null;
@@ -50,7 +51,10 @@ export const ShopWindow: React.FC<ShopWindowProps> = ({ winId, state, updateStat
         );
 
         // Normalize new card if it doesn't exist
-        const finalCard = existingCard || normalizeCard({ ...newCard, id: `card_gen_${Date.now()}` });
+        const finalCard = existingCard || normalizeCard({ 
+            ...newCard, 
+            id: generateCardId(state.cardPool) 
+        });
 
         updateState(prev => {
             const newChars = { ...prev.characters };
@@ -115,7 +119,7 @@ export const ShopWindow: React.FC<ShopWindowProps> = ({ winId, state, updateStat
                         // Pass the calculated half-price as fixed cost
                         fixedCost={generatedCardCost}
                         initialCard={{
-                            id: `new_${Date.now()}`,
+                            id: generateCardId(state.cardPool),
                             name: "新能力",
                             description: "描述...",
                             itemType: "skill",

@@ -21,6 +21,7 @@ export interface WindowProps {
     noPadding?: boolean;
     disableContentScroll?: boolean; // If true, the content area won't auto-scroll (useful for internal layouts like Shop/Pools)
     className?: string; // Override outer container class
+    fullScreen?: boolean; // New: Fullscreen mode (removes outer padding and border radius)
 }
 
 export const Window: React.FC<WindowProps> = ({
@@ -36,23 +37,23 @@ export const Window: React.FC<WindowProps> = ({
     isOverlay = true,
     noPadding = false,
     disableContentScroll = false,
-    className = ""
+    className = "",
+    fullScreen = false
 }) => {
     const isMouseDownOnOverlay = useRef(false);
     
-    // Stop propagation of touch events to prevent SlidingLayout from capturing swipes
-    const handleStopPropagation = (e: React.TouchEvent | React.MouseEvent) => {
+    // Stop propagation of touch events ONLY on the overlay/mask to prevent passthrough clicks
+    // But allow content interactions to bubble naturally so global listeners work
+    const handleOverlayTouch = (e: React.TouchEvent) => {
         e.stopPropagation();
     };
 
     // Removed 'shadow-2xl' to rely on '.glass-panel' global shadow
     const panelContent = (
         <div 
-            className={`glass-panel flex flex-col w-full ${maxWidth} ${height} ${className} overflow-hidden`}
-            // Important: Stop swipe propagation on the window content itself
-            onTouchStart={handleStopPropagation}
-            onTouchMove={handleStopPropagation}
-            onTouchEnd={handleStopPropagation}
+            className={`glass-panel flex flex-col w-full ${maxWidth} ${height} ${className} overflow-hidden ${fullScreen ? '!rounded-none !border-0' : ''}`}
+            // Removed aggressive onTouch* stopPropagation handlers here to allow child drag events (like TextArea resize) to bubble or be captured globally.
+            // The SlidingLayout is already disabled via props in App.tsx when windows are open.
         >
             {/* Header */}
             {(title || onClose || headerActions) && (
@@ -98,11 +99,11 @@ export const Window: React.FC<WindowProps> = ({
 
     return createPortal(
         <div 
-            className="fixed inset-0 bg-overlay flex items-center justify-center p-4 animate-in fade-in duration-200" 
+            className={`fixed inset-0 bg-overlay flex items-center justify-center animate-in fade-in duration-200 ${fullScreen ? 'p-0' : 'p-4'}`} 
             style={{ zIndex }}
-            onTouchStart={handleStopPropagation}
-            onTouchMove={handleStopPropagation}
-            onTouchEnd={handleStopPropagation}
+            onTouchStart={handleOverlayTouch}
+            onTouchMove={handleOverlayTouch}
+            onTouchEnd={handleOverlayTouch}
             onMouseDown={(e) => {
                 if (e.target === e.currentTarget) {
                     isMouseDownOnOverlay.current = true;

@@ -1,14 +1,43 @@
 
-import { AppSettings, GlobalContextMessage, Character, GameImage } from "../../types";
+
+import { AppSettings, GlobalContextMessage, Character, GameImage, AIConfig, GameplaySettings } from "../../types";
+
+// Helper: Format Reader Comments from AIConfig
+export const formatReaderComments = (config?: AIConfig): string => {
+    let commentsStr = "";
+
+    // Part A: Pure Comments (Independent List)
+    if (config?.pureComments && config.pureComments.length > 0) {
+            commentsStr += "[独立批注]\n" + config.pureComments.join("\n") + "\n\n";
+    }
+
+    // Part B: Branch Comments (Big blocks)
+    const comments = config?.readerComments || [];
+    if (comments.length > 0) {
+            // Added trailing separator for consistent blocking
+            commentsStr += "[段落批注]\n" + comments.join("\n\n----------------\n\n") + "\n\n----------------\n\n";
+    }
+    
+    if (!commentsStr) {
+        commentsStr = "（暂无读者意见）";
+    }
+    
+    return commentsStr;
+};
 
 // Helper: Replace Global Variables
 export const replaceGlobalVariables = (text: string, settings?: AppSettings): string => {
-    if (!text || !settings?.globalVariables || settings.globalVariables.length === 0) return text;
+    if (!text) return text;
+
     let result = text;
-    settings.globalVariables.forEach(v => {
-         // Use split/join for simple replacement of all occurrences
-         result = result.split(`{{${v.key}}}`).join(v.value);
-    });
+    
+    // 1. User Defined Global Variables
+    if (settings?.globalVariables && settings.globalVariables.length > 0) {
+        settings.globalVariables.forEach(v => {
+            result = result.split(`{{${v.key}}}`).join(v.value);
+        });
+    }
+
     return result;
 };
 
@@ -158,7 +187,7 @@ export const parsePromptStructure = (
 export const buildContextMessages = (
     globalContext: GlobalContextMessage | any, 
     modelContext: GlobalContextMessage | any, // New: Model-specific context
-    characterContext: any, // contextConfig from Char
+    characterContext: any, // contextConfig from Char (Now DEPRECATED/IGNORED in this function)
     promptInput: string | any[] | Array<{role: string, parts: any[]}>, // Accepts String, Parts Array, or Structured Messages
     settings?: AppSettings
 ) => {
@@ -174,10 +203,12 @@ export const buildContextMessages = (
         rawMessages.push(...modelContext.messages);
     }
 
-    // 3. Character Context (if any)
-    if (characterContext && characterContext.messages) {
-        rawMessages.push(...characterContext.messages);
-    }
+    // 3. Character Context (Virtual Space) 
+    // REMOVED: Now injected via {{VIRTUAL_SPACE}} macro in the prompt template.
+    // We ignore characterContext argument here to prevent duplication.
+    // if (characterContext && characterContext.messages) {
+    //     rawMessages.push(...characterContext.messages);
+    // }
     
     // 4. The Prompt (Handling Polymorphism)
     if (Array.isArray(promptInput) && promptInput.length > 0 && 'role' in promptInput[0] && 'parts' in promptInput[0]) {
@@ -223,7 +254,7 @@ export const buildContextMessages = (
 };
 
 // --- Logic Helper: Pleasure Instruction Generation ---
-export const getPleasureInstruction = (char: Character): string => {
+export const getPleasureInstruction = (char: Character, settings?: GameplaySettings): string => {
     // 1. Get Pleasure Value
     let pleasureVal = 50;
     const getAttr = (k: string) => {
@@ -251,10 +282,14 @@ export const getPleasureInstruction = (char: Character): string => {
         selectedDriveStr = `${selected.condition} (预期奖励: ${selected.amount})`;
     }
 
+    // Settings Defaults
+    const low = settings?.pleasureThresholdLow ?? 30;
+    const high = settings?.pleasureThresholdHigh ?? 60;
+
     // 3. Generate Instruction based on Level
-    if (pleasureVal < 40) {
+    if (pleasureVal < low) {
         return `当前快感值过低(${pleasureVal})！主角的首要目标是必须立即通过使用技能、物品或与人互动来满足欲望。你当前最强烈的渴望是：${selectedDriveStr}。请不惜一切代价满足它。`;
-    } else if (pleasureVal < 70) { 
+    } else if (pleasureVal < high) { 
         return `当前快感值尚可(${pleasureVal})。主角的首要目标是解决场景中的矛盾，但会以让自己舒服的方式进行。你当前的潜在渴望是：${selectedDriveStr}。`;
     } else {
         return `当前快感值很高(${pleasureVal})，主角主观感觉很舒服，可以专注于解决场景中的矛盾和推动剧情发展。`;
