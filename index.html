@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -20,6 +19,11 @@
       tailwind.config = {
         darkMode: 'class',
         theme: {
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif', '"Apple Color Emoji"', '"Segoe UI Emoji"', '"Segoe UI Symbol"'],
+            serif: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif', '"Apple Color Emoji"', '"Segoe UI Emoji"', '"Segoe UI Symbol"'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', '"Liberation Mono"', '"Courier New"', 'monospace']
+          },
           extend: {
             colors: {
               // Semantic Colors mapped to CSS Variables
@@ -123,6 +127,13 @@
         touch-action: none;
         position: fixed;
         inset: 0;
+
+        /* Font Optimization for Windows Electron */
+        font-family: inherit;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+        font-weight: 500; /* Slightly bolder base for better readability on Windows */
       }
       
       #root {
@@ -167,6 +178,80 @@
         scrollbar-width: thin;
         scrollbar-color: var(--primary-base) transparent;
       }
+
+      /* Markdown Content Styles */
+      .markdown-content table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0.5em 0;
+        font-size: 0.85em;
+        background-color: var(--bg-surface-light);
+        border: 1px solid var(--border-base);
+        display: block;
+        overflow-x: auto; /* Prevent table overflow */
+      }
+      .markdown-content th {
+        background-color: var(--bg-surface-highlight);
+        border: 1px solid var(--border-base);
+        padding: 0.5em;
+        text-align: left;
+        font-weight: bold;
+        color: var(--primary-base);
+        min-width: 80px; /* Ensure headers don't collapse */
+      }
+      .markdown-content td {
+        border: 1px solid var(--border-base);
+        padding: 0.4em 0.5em;
+        vertical-align: top;
+        min-height: 1.5em; /* Ensure empty cells show up */
+      }
+      .markdown-content tr:nth-child(even) {
+        background-color: color-mix(in srgb, var(--bg-surface), transparent 50%);
+      }
+      .markdown-content ul {
+        padding-left: 1.2em;
+        margin: 0.5em 0;
+        list-style-type: disc; /* Ensure bullets show */
+      }
+      .markdown-content ol {
+        padding-left: 1.2em;
+        margin: 0.5em 0;
+        list-style-type: decimal;
+      }
+      .markdown-content li {
+        margin-bottom: 0.2em;
+        display: list-item; /* Force list item display */
+      }
+      /* Updated Blockquote Style: Transparent background, colored border only */
+      .markdown-content blockquote {
+        border-left: 4px solid var(--border-highlight);
+        margin: 0.2em 0;
+        color: var(--text-muted);
+        font-style: italic;
+        background: transparent; /* No background */
+        padding: 0 0 0 12px; /* Indent text from border */
+        border-radius: 0;
+      }
+      .markdown-content p {
+        margin-top: 0; 
+        margin-bottom: 0; /* REMOVE BOTTOM MARGIN completely to fix spacing issues */
+        /* Ensure text doesn't collapse excessively */
+        min-height: 1px; 
+      }
+      /* Ensure first child (usually a P) has no top margin */
+      .markdown-content > *:first-child {
+        margin-top: 0;
+      }
+      .markdown-content strong {
+        color: var(--text-highlight);
+        font-weight: bold;
+      }
+      /* Override Italics: Use Primary Color and Normal Font Style */
+      .markdown-content em, 
+      .markdown-content .italic {
+        color: var(--primary-base);
+        font-style: normal !important;
+      }
     </style>
   <script type="importmap">
 {
@@ -182,11 +267,12 @@
     "@capacitor/core": "https://aistudiocdn.com/@capacitor/core@^7.4.4",
     "@capacitor/filesystem": "https://aistudiocdn.com/@capacitor/filesystem@^7.1.5",
     "@capacitor/app": "https://aistudiocdn.com/@capacitor/app@^7.0.0",
-    "@capacitor/status-bar": "https://esm.sh/@capacitor/status-bar@^8.0.0"
+    "@capacitor/status-bar": "https://esm.sh/@capacitor/status-bar@^8.0.0",
+    "marked": "https://esm.sh/marked@12.0.0",
+    "localforage": "https://esm.sh/localforage@^1.10.0"
   }
 }
 </script>
-<link rel="stylesheet" href="/index.css">
 </head>
   <body class="bg-app text-body">
     <!-- 
@@ -221,7 +307,7 @@
     </svg>
 
     <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
+    <script type="module" src="./index.tsx"></script>
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
