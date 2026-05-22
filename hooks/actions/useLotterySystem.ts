@@ -3,6 +3,7 @@ import { MutableRefObject } from 'react';
 import { GameState, Character, PrizePool, PrizeItem, Card, AttributeVisibility, DebugLog } from '../../types';
 import { normalizeCard, determineCharacterReaction } from '../../services/aiService';
 import { removeInstances } from '../../services/attributeUtils';
+import { generateCardId, generateShortId, generatePrizeItemId, generateEffectId } from '../../services/idUtils';
 
 interface UseLotterySystemProps {
     stateRef: MutableRefObject<GameState>;
@@ -70,6 +71,10 @@ export const useLotterySystem = ({
                 const newCardsToAdd: Card[] = [];
                 const inventoryIdsToAdd: string[] = [];
                 
+                // Track IDs locally for batch to prevent collisions within this draw
+                const usedIds = new Set(state.cardPool.map(c => c.id));
+                const usedEffIds = new Set<string>();
+
                 drawnItems.forEach(item => {
                     // Check if card already exists in pool (re-use definition)
                     const existing = state.cardPool.find(c => c.name === item.name && c.description === item.description) 
@@ -78,8 +83,15 @@ export const useLotterySystem = ({
                     if (existing) {
                         inventoryIdsToAdd.push(existing.id);
                     } else {
+                        // Generate new unique ID
+                        const newId = generateCardId(usedIds);
+                        usedIds.add(newId);
+                        
+                        const effId = generateEffectId(usedEffIds);
+                        usedEffIds.add(effId);
+
                         let newCard: Card = {
-                            id: `prize_card_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                            id: newId,
                             name: item.name,
                             description: item.description,
                             itemType: 'consumable',
@@ -87,7 +99,7 @@ export const useLotterySystem = ({
                             cost: 0,
                             effects: [
                                 {
-                                    id: `eff_prize_${Date.now()}`,
+                                    id: effId,
                                     name: "奖池物品",
                                     targetType: 'self',
                                     targetAttribute: '健康',
@@ -161,14 +173,19 @@ export const useLotterySystem = ({
                 
                 if (availableDepositIds.length > 0) {
                     const validCards = availableDepositIds.map(id => state.cardPool.find(c => c.id === id)).filter(Boolean) as Card[];
-                    
-                    const newPrizeItems: PrizeItem[] = validCards.map(c => ({
-                        id: `pitem_dep_${Date.now()}_${Math.random().toString(36).substr(2,5)}`,
-                        name: c.name,
-                        description: c.description,
-                        weight: 1,
-                        isHidden: c.visibility === AttributeVisibility.PRIVATE
-                    }));
+                    const usedItemIds = new Set(pool.items.map(i => i.id));
+
+                    const newPrizeItems: PrizeItem[] = validCards.map(c => {
+                        const pid = generatePrizeItemId(usedItemIds);
+                        usedItemIds.add(pid);
+                        return {
+                            id: pid,
+                            name: c.name,
+                            description: c.description,
+                            weight: 1,
+                            isHidden: c.visibility === AttributeVisibility.PRIVATE
+                        };
+                    });
 
                     updateState(prev => ({
                         ...prev,

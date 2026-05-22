@@ -34,13 +34,19 @@ export interface PendingAction {
     isHidden?: boolean;
 }
 
+// 0.5s Silent MP3 Base64
+// Used to trick Android/iOS into keeping the WebView thread active during background execution
+const SILENT_AUDIO_SOURCE = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTSVMAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABJwDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD//////////////////////////////////wAAADFMYXZjNTguMTM0LjEwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//OEAAABAAAAABTWAAAAAAAAAAAAAA==";
+
 export const useEngine = ({ state, stateRef, updateState, addLog, addDebugLog, requestPlayerReaction, cancelReactionRequest }: UseEngineProps) => {
     const [isProcessingAI, setIsProcessingAI] = useState(false);
     const [processingLabel, setProcessingLabel] = useState("");
     
     // Session ID to validate async returns. 
-    // If stop is clicked, we increment session ID, invalidating old in-flight requests.
     const requestSessionId = useRef(0);
+    
+    // Keep-Alive Audio Ref
+    const keepAliveAudioRef = useRef<HTMLAudioElement | null>(null);
     
     const [selectedCharId, setSelectedCharId] = useState<string | null>(null);
     const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
@@ -61,21 +67,54 @@ export const useEngine = ({ state, stateRef, updateState, addLog, addDebugLog, r
         setIsProcessingAI(false);
     };
 
+    // --- KEEP ALIVE LOGIC ---
+    // Forces the OS to treat this app as a media player, keeping the network stack alive.
+    const startKeepAlive = () => {
+        // Only run on native devices where background freeze is an issue
+        if (!Capacitor.isNativePlatform()) return;
+        
+        try {
+            if (!keepAliveAudioRef.current) {
+                keepAliveAudioRef.current = new Audio(SILENT_AUDIO_SOURCE);
+                keepAliveAudioRef.current.loop = true;
+                keepAliveAudioRef.current.volume = 0.01; // Non-zero volume is required by some OSs
+            }
+            // Reset and play
+            keepAliveAudioRef.current.currentTime = 0;
+            const playPromise = keepAliveAudioRef.current.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => {
+                    console.warn("Background Keep-Alive Audio blocked:", e);
+                });
+            }
+        } catch (e) {
+            console.warn("Audio setup failed:", e);
+        }
+    };
+
+    const stopKeepAlive = () => {
+        if (keepAliveAudioRef.current) {
+            keepAliveAudioRef.current.pause();
+            // We don't nullify it, reuse the instance
+        }
+    };
+
     // Wrapper for AI logic that checks Session ID
-    // If the ID changed during the async operation (Stop was clicked), we simply discard the result.
-    // AND handles Android Background Tasks to keep connection alive
     const wrapAiLogic = async <T>(logic: () => Promise<T>): Promise<T | undefined> => {
         const currentSession = requestSessionId.current;
         
+        // 1. Start Keep-Alive Audio (The "Media Player" Trick)
+        startKeepAlive();
+
         let taskId = -1;
-        // Native Platform Background Keep-Alive
+        // 2. Register Native Background Task (The "Official" Way)
         if (Capacitor.isNativePlatform()) {
             try {
                 taskId = await (App as any).registerTask(() => {
                     console.warn('Background task timed out or finished.');
                     (App as any).finish(taskId);
                 });
-                console.log('Background task registered:', taskId);
+                // console.log('Background task registered:', taskId);
             } catch (e) {
                 console.warn('Failed to register background task:', e);
             }
@@ -92,10 +131,12 @@ export const useEngine = ({ state, stateRef, updateState, addLog, addDebugLog, r
             if (currentSession !== requestSessionId.current) return undefined;
             throw e;
         } finally {
-            // Finish Background Task
+            // 3. Cleanup: Stop Audio & Finish Task
+            stopKeepAlive();
+            
             if (taskId !== -1) {
                 (App as any).finish(taskId);
-                console.log('Background task finished:', taskId);
+                // console.log('Background task finished:', taskId);
             }
         }
     };
@@ -110,7 +151,7 @@ export const useEngine = ({ state, stateRef, updateState, addLog, addDebugLog, r
         checkSession: () => requestSessionId.current
     });
 
-    const { performCharacterAction, submitPlayerTurn, performUnveil } = useActionLogic({
+    const { performCharacterAction, submitPlayerTurn, performUnveil, performInstantAction, processMove } = useActionLogic({
         stateRef, updateState, addLog, setIsProcessingAI, setProcessingLabel, handleAiFailure, 
         setSelectedCharId, playerInput, setPlayerInput, 
         selectedCharId,
@@ -198,6 +239,7 @@ export const useEngine = ({ state, stateRef, updateState, addLog, addDebugLog, r
         
         setIsProcessingAI(false);
         setProcessingLabel("");
+        stopKeepAlive(); // Ensure audio stops if manually aborted
         addLog("系统: 流程已强制终止 (Terminated)。当前 AI 请求被丢弃，轮次状态保留。点击[继续]可恢复。");
     };
 
@@ -210,13 +252,15 @@ export const useEngine = ({ state, stateRef, updateState, addLog, addDebugLog, r
         playerInput, setPlayerInput,
         pendingActions, setPendingActions,
         // FIX: Correctly pass images parameter
-        submitPlayerTurn: (t: number, images?: GameImage[]) => wrapAiLogic(async () => submitPlayerTurn(t, images)),
+        submitPlayerTurn: (t: number, images?: GameImage[], overrideSpeech?: string, forcePrune?: boolean) => wrapAiLogic(async () => submitPlayerTurn(t, images, overrideSpeech, forcePrune)),
+        performInstantAction: (charId: string, targetId: string, speech: string, actionDesc: string, images?: GameImage[], isItemOperation?: boolean, timePassed?: number) => wrapAiLogic(async () => performInstantAction(charId, targetId, speech, actionDesc, images, isItemOperation, timePassed)),
         recalculateTurnOrder: () => wrapAiLogic(phaseOrderDetermination),
         resetLocation: (locId: string, keepRegion: boolean, instructions?: string, cultureInstructions?: string, locImages?: GameImage[], charImages?: GameImage[]) => 
             wrapAiLogic(async () => resetLocation(locId, keepRegion, instructions, cultureInstructions, locImages, charImages)),
         stopExecution, // Exported for UI
         performUnveil: (logs: string[], charIds: string[], playerIntent?: string) => wrapAiLogic(async () => performUnveil(logs, charIds, playerIntent)),
         exploreLocation: (loc: any, isManual: boolean = false, instructions: string = "", cultureInstructions: string = "", locImages: GameImage[] = [], charImages: GameImage[] = []) => 
-            wrapAiLogic(async () => exploreLocation(loc, isManual, instructions, cultureInstructions, locImages, charImages))
+            wrapAiLogic(async () => exploreLocation(loc, isManual, instructions, cultureInstructions, locImages, charImages)),
+        processMove // Exported for Manual Logic (LeftPanel)
     };
 };

@@ -1,7 +1,7 @@
 
 import { MutableRefObject } from 'react';
-import { GameState, Character, Card, AttributeType, AttributeVisibility, MapLocation, DebugLog, Conflict, PrizeItem, Trigger, GameImage } from '../types';
-import { determineCharacterAction, generateUnveil, normalizeCard } from '../services/aiService';
+import { GameState, Character, Card, AttributeType, AttributeVisibility, MapLocation, MapRegion, DebugLog, Conflict, PrizeItem, Trigger, GameImage, StoryTag, TriggerEffect } from '../types';
+import { determineCharacterAction, generateUnveil, normalizeCard, generateStorySuggest } from '../services/aiService';
 import { DEFAULT_AI_CONFIG } from '../config';
 import { PendingAction } from './useEngine';
 import { advanceWorldTime, parseTimeDelta } from '../services/timeUtils';
@@ -9,6 +9,9 @@ import { getAttr, getCP, removeInstances } from '../services/attributeUtils';
 import { useLotterySystem } from './actions/useLotterySystem';
 import { useWorldActions } from './actions/useWorldActions';
 import { useSkillSystem } from './actions/useSkillSystem';
+import { generateConflictId, generateDriveId } from '../services/idUtils';
+import { executeEffects } from '../services/triggerService';
+import { updateStream, finishStream } from '../services/streamService';
 
 interface UseActionLogicProps {
     stateRef: MutableRefObject<GameState>;
@@ -49,6 +52,13 @@ export const useActionLogic = ({
                 [id]: { ...prev.triggers[id], ...updates }
             }
         }));
+    };
+    
+    // Helper to execute effects returned from AI
+    const handleTriggerEffects = (effects: TriggerEffect[]) => {
+        if (effects.length > 0) {
+            executeEffects(stateRef.current, effects, updateState, addLog);
+        }
     };
 
     // Instantiate Sub-Hooks
@@ -167,7 +177,75 @@ export const useActionLogic = ({
         }
     };
 
-    const submitPlayerTurn = async (timePassed: number = 0, images?: GameImage[]) => {
+    const performInstantAction = async (charId: string, targetId: string, speech: string, actionDesc: string, images?: GameImage[], isItemOperation?: boolean, timePassed: number = 0) => {
+        const startSession = checkSession();
+        const char = stateRef.current.characters[charId];
+        if (!char) return;
+
+        // 1. Log Speech directly with Images
+        if (speech.trim() || (images && images.length > 0)) {
+            addLog(`${char.isPlayer ? `${char.name}: ` : ''}${speech}`, { actingCharId: char.id, images: images });
+        }
+        
+        if (timePassed > 0) {
+            updateTimeAndLog(timePassed);
+        }
+
+        // Logic: Fallback to 'Interact' skill if action description is empty
+        // This allows pure conversation or reaction triggers without "Virtual Action"
+        if (!actionDesc.trim() && !isItemOperation) {
+             const interactCardId = 'card_interact_default';
+             const existingSkill = char.skills.find(s => s.id === interactCardId) || 
+                                   stateRef.current.cardPool.find(c => c.id === interactCardId);
+                                   
+             if (existingSkill) {
+                 try {
+                     await executeSkill(existingSkill, charId, targetId, false, true);
+                 } catch (e: any) {
+                     handleAiFailure("Instant Action (Interact)", e);
+                 }
+                 return;
+             }
+        }
+
+        try {
+            // 2. Construct Dynamic Virtual Card
+            const tempCard: Card = {
+                id: `virt_act_${Date.now()}`,
+                name: isItemOperation ? '物品操作' : '动作',
+                description: (actionDesc.trim() 
+                    ? `使用者的行为：${actionDesc}` 
+                    : "使用者的互动行为。") + (isItemOperation ? " / 尝试进行交易、获取或给予。" : ""),
+                itemType: 'skill',
+                triggerType: isItemOperation ? 'reaction' : 'active',
+                cost: 0,
+                isVirtualAction: true, // Mark as virtual so skill system knows it's a manual action
+                effects: [
+                    {
+                        id: `eff_virt_${Date.now()}`,
+                        name: isItemOperation ? "物品操作判定" : "动作判定",
+                        targetType: 'specific_char',
+                        targetAttribute: '健康', // Dummy attribute, mostly for reaction trigger
+                        targetId: targetId,
+                        value: 0,
+                        conditionDescription: (actionDesc.trim() 
+                            ? "场景中没有确切的条件阻止使用者进行该行为时，判定成功" 
+                            : "无") + (isItemOperation ? " / 尝试进行交易、获取或给予。" : ""), 
+                        conditionContextKeys: []
+                    }
+                ],
+                visibility: AttributeVisibility.PUBLIC
+            };
+
+            // 3. Execute immediately
+            await executeSkill(tempCard, charId, targetId, false, true);
+
+        } catch (e: any) {
+            handleAiFailure("Instant Action", e);
+        }
+    };
+
+    const submitPlayerTurn = async (timePassed: number = 0, images?: GameImage[], overrideSpeech?: string, forcePruneTurnOrder: boolean = false) => {
         const startSession = checkSession();
         setIsProcessingAI(true);
         setProcessingLabel("执行中...");
@@ -180,12 +258,15 @@ export const useActionLogic = ({
             if (!char || !char.isPlayer) return;
 
             // 1. Text Input & Images
-            if (playerInput.trim() || (images && images.length > 0)) {
+            const speechToLog = typeof overrideSpeech !== 'undefined' ? overrideSpeech : playerInput;
+            if (speechToLog === "[SKIP_LOG]") {
+                setPlayerInput("");
+            } else if (speechToLog.trim() || (images && images.length > 0)) {
                 // Remove quotes around player input
-                addLog(`${char.name}: ${playerInput}`, { actingCharId: activeCharId, images: images });
+                addLog(`${char.name}: ${speechToLog}`, { actingCharId: activeCharId, images: images });
                 setPlayerInput("");
             } else if (pendingActions.length === 0) {
-                addLog(`${char.name}没有行动。`, { actingCharId: activeCharId });
+                addLog(`系统: ${char.name}跳过回合`, { type: 'system', actingCharId: activeCharId });
             }
 
             // 2. Process Pending Actions
@@ -201,7 +282,7 @@ export const useActionLogic = ({
                         card = state.cardPool.find(c => c.id === action.cardId);
                     }
                     if (card) {
-                        await executeSkill(card, char.id, action.targetId, undefined, isBurningLife);
+                        await executeSkill(card, char.id, action.targetId, isBurningLife);
                     }
                 } else if (action.type === 'move_to' && action.destinationId) {
                     processMove(char.id, action.destinationId, action.destinationName);
@@ -223,10 +304,25 @@ export const useActionLogic = ({
                 updateTimeAndLog(timePassed > 0 ? timePassed : 60);
                 setSelectedCardId(null);
                 setSelectedTargetId(null);
-                updateState(prev => ({
-                    ...prev,
-                    round: { ...prev.round, turnIndex: prev.round.turnIndex + 1, phase: 'turn_start' }
-                }));
+                updateState(prev => {
+                    let nextOrder = [...prev.round.currentOrder];
+                    let nextTurnIndex = prev.round.turnIndex + 1;
+
+                    if (forcePruneTurnOrder) {
+                        // Timeout: Skip subsequent non-environment characters by advancing turnIndex
+                        while (nextTurnIndex < nextOrder.length) {
+                            if (nextOrder[nextTurnIndex].startsWith('env_')) {
+                                break;
+                            }
+                            nextTurnIndex++;
+                        }
+                    }
+
+                    return {
+                        ...prev,
+                        round: { ...prev.round, currentOrder: nextOrder, turnIndex: nextTurnIndex, phase: 'turn_start' }
+                    }
+                });
             }
         } catch (e: any) {
             handleAiFailure("Player Turn", e);
@@ -243,47 +339,10 @@ export const useActionLogic = ({
      * Separated to allow background execution for Environment Characters
      */
     const executeAiTurnLogic = async (char: Character, startSession: number) => {
-        // Re-implementing context calculation to capture current state at execution time
+        // Prepare current location context
         let currentLocation: MapLocation | undefined;
         const pos = stateRef.current.map.charPositions[char.id];
         if (pos && pos.locationId) currentLocation = stateRef.current.map.locations[pos.locationId];
-
-        const nearbyKnown: MapLocation[] = [];
-        const nearbyUnknown: MapLocation[] = [];
-        
-        if (currentLocation) {
-             (Object.values(stateRef.current.map.locations) as MapLocation[]).forEach(loc => {
-                 if (loc.id === currentLocation?.id) return;
-                 const dist = Math.sqrt((loc.coordinates.x - currentLocation!.coordinates.x)**2 + (loc.coordinates.y - currentLocation!.coordinates.y)**2);
-                 if (dist <= 1000) {
-                     if (loc.isKnown) nearbyKnown.push(loc);
-                     else nearbyUnknown.push(loc);
-                 }
-             });
-        }
-
-        let nearbyContext = "";
-        if (nearbyKnown.length === 0 && nearbyUnknown.length === 0) {
-            nearbyContext = "(附近无其它已知地点)";
-        } else {
-            nearbyContext = nearbyKnown.map(l => {
-                const regionName = (l.regionId && stateRef.current.map.regions[l.regionId]) 
-                    ? stateRef.current.map.regions[l.regionId].name 
-                    : "未知区域";
-                return `[已知] ${l.name} (位于: ${regionName})`;
-            }).join(", ");
-            
-            if (nearbyUnknown.length > 0) {
-                nearbyContext += (nearbyKnown.length > 0 ? ", " : "") + "[其它地点] (附近的未知区域)";
-            }
-        }
-
-        const localOthers: Character[] = [];
-        const activeLocId = stateRef.current.map.activeLocationId;
-        (Object.values(stateRef.current.characters) as Character[]).forEach(c => {
-            const p = stateRef.current.map.charPositions[c.id];
-            if (p && p.locationId === activeLocId) localOthers.push(c);
-        });
 
         if (checkSession() !== startSession) return;
         
@@ -291,7 +350,7 @@ export const useActionLogic = ({
         const isStreaming = stateRef.current.appSettings.enableStreaming !== false;
         let streamLogId = "";
         if (isStreaming) {
-            streamLogId = `log_stream_${Date.now()}`;
+            streamLogId = `log_stream_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
             // Insert placeholder log
             addLog(`(...)`, { id: streamLogId, actingCharId: char.id });
         }
@@ -300,14 +359,12 @@ export const useActionLogic = ({
             char, 
             stateRef.current.world.history, 
             stateRef.current.world.attributes, 
-            localOthers, 
             stateRef.current.globalContext, 
             stateRef.current.cardPool, 
             stateRef.current.appSettings, 
-            stateRef.current.defaultSettings,
+            stateRef.current.defaultSettings, 
             stateRef.current.world.worldGuidance,
             currentLocation,
-            nearbyContext,
             stateRef.current.map.regions, 
             stateRef.current.prizePools,
             stateRef.current.map.locations,
@@ -315,32 +372,42 @@ export const useActionLogic = ({
             stateRef.current, 
             (msg) => addLog(msg, { type: 'system' }),
             handleTriggerUpdate,
-            // Streaming Callback
-            isStreaming ? (text) => updateLogEntry(streamLogId, `${char.name}: ${text}`) : undefined
+            // Streaming Callback - Removed name prefix
+            isStreaming ? (text) => updateStream(streamLogId, text) : undefined,
+            // Abort Check
+            () => checkSession() !== startSession,
+            // Effects Callback (NEW)
+            handleTriggerEffects
         );
         
         if (checkSession() !== startSession) return;
         
-        // CRITICAL FIX: Removed the 'isPaused' check here.
-        // Environment characters run in background. Even if the round phase logic has paused the game 
-        // (waiting for next round or user input), the background generation result (Drives/Conflicts) should still apply.
-        // The checkSession() above handles the explicit "Stop" button/session invalidation.
-
+        // --- 1. Update Character Move Plan (If new plan is generated) ---
+        // If movePlan is present in AI response (even if empty string to clear), update it
+        if (action.movePlan !== undefined) {
+             updateState(prev => {
+                 const newChars = { ...prev.characters };
+                 if (newChars[char.id]) {
+                     newChars[char.id] = { ...newChars[char.id], movePlan: action.movePlan };
+                 }
+                 return { ...prev, characters: newChars };
+             });
+        }
+        
         if (!isStreaming) {
             if (action.narrative) addLog(`<span class="italic">* ${action.narrative} *</span>`, { actingCharId: char.id });
-            // Remove quotes for speech
-            if (action.speech) addLog(`${char.name}: ${action.speech}`, { actingCharId: char.id });
-            if (!action.narrative && !action.speech && action['text']) addLog(`${char.name}: ${action['text']}`, { actingCharId: char.id });
+            if (action.speech) addLog(`${action.speech}`, { actingCharId: char.id });
+            if (!action.narrative && !action.speech && action['text']) addLog(`${action['text']}`, { actingCharId: char.id });
         } else {
             // Finalize the streamed log with parsed content to ensure it's clean
             let finalContent = "";
             if (action.narrative) finalContent += `<span class="italic">* ${action.narrative} *</span>`;
-            // Remove quotes for speech in final stream content
-            if (action.speech) finalContent += (finalContent ? "<br/>" : "") + `${char.name}: ${action.speech}`;
+            if (action.speech) finalContent += (finalContent ? "<br/>" : "") + `${action.speech}`;
             // If parsing failed (empty action), keep whatever was streamed
             if (finalContent) {
                 updateLogEntry(streamLogId, finalContent);
             }
+            finishStream(streamLogId);
         }
 
         if (action.timePassed) {
@@ -356,15 +423,15 @@ export const useActionLogic = ({
             
             updateState(prev => {
                 const newChars = { ...prev.characters };
-                let maxId = 0;
-                (Object.values(prev.characters) as Character[]).forEach(c => {
-                    c.conflicts?.forEach(x => { const n = parseInt(x.id); if (!isNaN(n) && n > maxId) maxId = n; });
-                });
-                let nextId = maxId + 1;
+                const usedConflictIds = new Set<string>();
+                Object.values(prev.characters).forEach(c => c.conflicts?.forEach(x => usedConflictIds.add(x.id)));
+
                 action.generatedConflicts!.forEach(c => {
                     const target = newChars[c.targetCharId];
                     if (target) {
-                        target.conflicts = [...(target.conflicts || []), { id: String(nextId++), desc: c.desc, apReward: c.apReward || 5, solved: false }];
+                        const newId = generateConflictId(usedConflictIds);
+                        usedConflictIds.add(newId);
+                        target.conflicts = [...(target.conflicts || []), { id: newId, desc: c.desc, apReward: c.apReward || 5, solved: false }];
                     }
                 });
                 return { ...prev, characters: newChars };
@@ -376,11 +443,15 @@ export const useActionLogic = ({
 
             updateState(prev => {
                 const newChars = { ...prev.characters };
+                const usedDriveIds = new Set<string>();
+                Object.values(prev.characters).forEach(c => c.drives?.forEach(d => usedDriveIds.add(d.id)));
+
                 action.generatedDrives!.forEach(d => {
                     const target = newChars[d.targetCharId];
                     if (target) {
-                        // Ensure drive has an ID
-                        const newDrive = { ...d.drive, id: d.drive.id || `drive_gen_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` };
+                        const newId = generateDriveId(usedDriveIds);
+                        usedDriveIds.add(newId);
+                        const newDrive = { ...d.drive, id: newId };
                         target.drives = [...(target.drives || []), newDrive];
                     }
                 });
@@ -389,20 +460,15 @@ export const useActionLogic = ({
         }
 
         if (action.commands && action.commands.length > 0) {
-            // Count use_skill actions for Burning Life logic
             let skillActionCount = 0;
             
             for (const cmd of action.commands) {
                 if (checkSession() !== startSession) break;
-                // Keep safety check for commands to avoid state corruption during pause
                 if (stateRef.current.round.isPaused) break; 
                 
                 const freshState = stateRef.current;
                 const freshChar = freshState.characters[char.id];
 
-                // Determine if this is a "Burning Life" action (index >= 2 for skills)
-                // Note: Other commands don't usually burn life in this context, but we track count.
-                // Assuming standard 2 action limit applies to skills.
                 const isBurningLife = (cmd.type === 'use_skill') && (skillActionCount >= 2);
                 
                 if (cmd.type === 'lottery' && cmd.poolId && freshChar) {
@@ -413,7 +479,7 @@ export const useActionLogic = ({
                     const skill = freshChar.skills.find(s => s.id === cmd.skillId) || freshState.cardPool.find(s => s.id === cmd.skillId && freshChar.inventory.includes(s.id));
                     if (skill) {
                         if (skill.triggerType === 'active' || skill.triggerType === 'reaction') {
-                            await executeSkill(skill, char.id, cmd.targetId, cmd.effectOverrides, isBurningLife);
+                            await executeSkill(skill, char.id, cmd.targetId, isBurningLife);
                             skillActionCount++;
                         } else if (addDebugLog) {
                             addDebugLog({ id: `warn_${Date.now()}`, timestamp: Date.now(), characterName: "System", prompt: "Skill Validation Failed", response: `AI attempted to use passive skill [${skill.name}] as active action. Blocked.` });
@@ -468,7 +534,7 @@ export const useActionLogic = ({
         }
 
         if (char.isPlayer) {
-            if (selectedCharId !== activeCharId) setSelectedCharId(activeCharId);
+            // if (selectedCharId !== activeCharId) setSelectedCharId(activeCharId); // Removed auto-select
             return; 
         }
 
@@ -489,13 +555,81 @@ export const useActionLogic = ({
             executeAiTurnLogic(char, startSession).catch(e => {
                 console.error("Env AI Background Error", e);
             });
+
+            // 4. PARALLEL: Trigger Story Suggestion here (Optimized: Only when env acts)
+            generateStorySuggest(
+                stateRef.current, 
+                addDebugLog, 
+                (msg) => addLog(msg, { type: 'system' }),
+                handleTriggerUpdate
+            ).then(result => {
+                if (!result) return;
+                // Basic session check, though suggestions are less critical to sync
+                if (checkSession() !== startSession) return;
+                
+                // --- A. Process Story Tags & Suggestions ---
+                updateState(prev => {
+                    const newWorld = { ...prev.world, lastFunSuggest: result.funsuggest };
+                    
+                    // Merge Tags logic (same as LeftPanel)
+                    const existingTags = prev.world.storyTags || [];
+                    const existingTexts = new Set(existingTags.map(t => t.text));
+                    const newTags: StoryTag[] = [];
+                    
+                    result.tagsuggest.forEach(text => {
+                        if (!existingTexts.has(text) && text.trim()) {
+                            newTags.push({
+                                id: `tag_auto_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+                                text: text.trim(),
+                                status: 'neutral',
+                                timestamp: Date.now()
+                            });
+                            existingTexts.add(text);
+                        }
+                    });
+                    
+                    // Enforce Limit
+                    let allTags = [...existingTags, ...newTags];
+                    const neutrals = allTags.filter(t => t.status === 'neutral');
+                    const nonNeutrals = allTags.filter(t => t.status !== 'neutral');
+                    neutrals.sort((a, b) => a.timestamp - b.timestamp);
+                    const keptNeutrals = neutrals.slice(Math.max(0, neutrals.length - 20));
+                    
+                    newWorld.storyTags = [...nonNeutrals, ...keptNeutrals];
+                    return { ...prev, world: newWorld };
+                });
+
+                // --- B. Process Coming Character Movement ---
+                // "comingchar" from StorySuggest is an array of IDs.
+                // We move these characters to the location where the environment character is acting.
+                // Environment char ID is `env_LOCID`, so target location is derived from that.
+                if (result.comingchar && Array.isArray(result.comingchar) && result.comingchar.length > 0) {
+                     const targetLocId = char.id.replace('env_', '');
+                     const targetLocName = stateRef.current.map.locations[targetLocId]?.name || "未知地点";
+
+                     result.comingchar.forEach((comingId: string) => {
+                         const comingChar = stateRef.current.characters[comingId];
+                         if (comingChar && comingChar.movePlan) { // Only move if plan exists (double check)
+                             // Use standard processMove logic (physique check, active update, conflict, logging, plan clearing)
+                             // Note: processMove logs as action, which is what we want.
+                             processMove(comingId, targetLocId, targetLocName);
+                             // No manual state update needed here as processMove handles it
+                         }
+                     });
+                }
+
+                addLog("系统: 剧情顾问已根据环境变化更新了建议。", { type: 'system' });
+            }).catch(e => {
+                console.warn("Auto Story Suggest Failed (Env Step)", e);
+            });
+            
             return;
         }
         // -----------------------------------------------------
 
         setIsProcessingAI(true);
         setProcessingLabel(`${char.name} 正在思考...`);
-        setSelectedCharId(activeCharId);
+        // setSelectedCharId(activeCharId); // Removed auto-select for AI characters too
 
         try {
             await executeAiTurnLogic(char, startSession);
@@ -521,6 +655,8 @@ export const useActionLogic = ({
     return {
         performCharacterAction,
         submitPlayerTurn,
-        performUnveil
+        performUnveil,
+        performInstantAction,
+        processMove // Exported for use in UI
     };
 };

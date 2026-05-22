@@ -1,4 +1,5 @@
 
+
 export enum AttributeType {
   NUMBER = 'NUMBER',
   TEXT = 'TEXT',
@@ -16,6 +17,7 @@ export enum Provider {
   OPENROUTER = 'openrouter', // OpenRouter
   OPENAI = 'openai',
   CLAUDE = 'claude',
+  CUSTOM = 'custom', // Custom OpenAI Compatible
 }
 
 export enum TerrainType {
@@ -35,18 +37,40 @@ export interface GlobalContextConfig {
     messages: GlobalContextMessage[];
 }
 
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
 
 export interface AIConfig {
   provider: Provider;
   model?: string;
   apiKey?: string; // Optional override per char
+  customEndpointId?: string; // If provider is CUSTOM, use this ID
   temperature?: number;
   topP?: number;
   topK?: number;
   maxOutputTokens?: number;
   reasoningEffort?: ReasoningEffort; // New: Thinking Level
   contextConfig?: GlobalContextConfig; // New: Model specific context
+  
+  // New: Feedback / Annotations stored per model config
+  readerComments?: string[]; // Queue of last 3 feedback strings (Branch Comments)
+  pureComments?: string[]; // Queue of last 20 simple comments (Pure Comments)
+}
+
+export interface CustomEndpoint {
+    id: string;
+    name: string;
+    baseUrl: string;
+    apiKey?: string;
+    model?: string; // Default model name for this endpoint
+    
+    // Capabilities
+    enableVision: boolean; // Send images?
+    enableJsonMode: boolean; // Send response_format: json_object?
+    
+    // Advanced
+    headers?: string; // JSON string for extra headers
+    extraBody?: string; // JSON string for extra body params
+    contextWindow?: number; // Optional override for context window size
 }
 
 export interface ContextConfig {
@@ -94,6 +118,7 @@ export interface Card {
   cost: number; // Cost in Creation Points
   effects: Effect[];
   visibility?: AttributeVisibility; // New: Card Visibility (Public/Private)
+  isVirtualAction?: boolean; // New: Virtual action card merging interact/trade/acquire
 }
 
 export interface Drive {
@@ -109,6 +134,21 @@ export interface Conflict {
     apReward: number; // Action Points (Player) & CP (Character) rewarded when solved
     solved: boolean; 
     solvedTimestamp?: number; // When it was solved
+}
+
+export interface Secret {
+    id: string;
+    question: string; // The attribute name or question (e.g. "喜欢吃的东西")
+    correctAnswer: string;
+    wrongAnswerA: string;
+    wrongAnswerB: string;
+    solved: boolean;
+}
+
+export interface LifeTrajectory {
+    past: string;     // 已完成的章节 (仅作 Context)
+    current: string;  // 当前正在进行的章节 (引导剧情)
+    future: string;   // 预设的下一章节 (用于接替 Current)
 }
 
 // --- IMAGE SYSTEM TYPES ---
@@ -168,20 +208,23 @@ export interface Character {
   name: string;
   appearance: string; // New: Publicly visible appearance
   description: string; // Private biography/personality
-  style?: string; // New: Speech style / sample text
+  // style removed: Replaced by Virtual Space (contextConfig)
   avatarUrl?: string;
   attributes: Record<string, GameAttribute>;
   skills: Card[]; // Fixed Skills (Deck)
   inventory: string[]; // IDs of cards in the Inventory (Hand)
   drives: Drive[]; // Conditions to gain Pleasure
   conflicts: Conflict[]; // Conflicts specific to this character
+  secrets?: Secret[]; // New: Secrets / Puzzle system
+  lifeTrajectory?: LifeTrajectory; // New: Life Trajectory System
+  movePlan?: string; // New: Current movement intention/plan
   
   useAiOverride?: boolean; // New: If true, use aiConfig. If false, use global.
   aiConfig?: AIConfig; // Only for NPCs
   
   memoryConfig?: CharacterMemoryConfig; // New: Character specific memory settings
   
-  contextConfig: ContextConfig; // What does the AI know?
+  contextConfig: ContextConfig; // What does the AI know? (Contains Virtual Space messages)
   
   // New fields for update
   appearanceCondition: string; // e.g. "When the player enters the tavern"
@@ -190,6 +233,9 @@ export interface Character {
   
   // Follower Logic
   isFollowing?: boolean; // If true, follows player to new locations
+  
+  // Professional Mode (New)
+  isProfessional?: boolean; // If true, uses specialized professional prompts instead of story prompts
 
   // Mail System
   mailHistory?: MailItem[]; // New: History of letters
@@ -197,6 +243,9 @@ export interface Character {
   // Multi-modal Support
   appearanceImages?: GameImage[]; // Max 1
   descriptionImages?: GameImage[]; // Max 3
+
+  // Legacy Memory (Recursive Import Support)
+  previousLifeLogs?: LogEntry[]; // New: Logs from previous save files, re-indexed to negative rounds
 }
 
 // --- PRIZE POOL TYPES ---
@@ -222,9 +271,51 @@ export interface PrizePool {
 // ------------------------
 
 // --- TRIGGER SYSTEM TYPES ---
-export type TriggerPhase = keyof PromptsConfig;
+export interface PromptsConfig {
+    // Deprecated keys removed: checkCondition, determineTurnOrder, analyzeTimePassage
+    checkConditionsBatch: string;
+    checkConditionsStrictInstruction: string; // New field for strict mode instruction
+    determineCharacterAction: string;
+    determineCharacterActionPro: string; // New: Professional Action
+    determineCharacterReaction: string;
+    determineCharacterReactionPro: string; // New: Professional Reaction
+    determineEnvAction: string; // New: Environment Character Action
+    determineEnvReaction: string; // New: Environment Character Reaction
+    generateLocationDetails: string;
+    analyzeNewConflicts: string;
+    analyzeSettlement: string;
+    generateCharacter: string;
+    generateUnveil: string; // New: Unveil character backstory
+    generateLife: string; // New: Life Trajectory Generation
+    // New instruction snippets
+    instruction_generateNewRegion: string;
+    instruction_existingRegionContext: string;
+    context_nearbyCharacters: string;
+    observation: string; // New: Observation prompt
+    generateLetter: string; // New: Letter generation prompt
+    storysuggest: string; // New: Story Suggestion Prompt
+}
 
-export type ConditionType = 'char_attr' | 'char_card' | 'world_time' | 'world_attr' | 'char_name' | 'loc_name' | 'region_name' | 'history';
+// Explicit Trigger Phases decoupled from PromptsConfig
+export type TriggerPhase = 
+    | 'checkConditionsBatch'
+    | 'determineCharacterAction'
+    | 'determineCharacterReaction'
+    | 'generateLocationDetails'
+    | 'analyzeSettlement'
+    | 'generateCharacter'
+    | 'generateUnveil'
+    | 'generateLife'
+    | 'observation' // Renamed: Removed 'generate'
+    | 'storysuggest' // Renamed: Removed 'generate'
+    | 'determineTurnOrder' // Logic-only phase
+    | 'hidden_round_1' // New: Hidden Round 1 Start
+    | 'hidden_round_2' // New: Hidden Round 2 Start
+    | 'hidden_round_3' // New: Hidden Round 3 Start
+    | 'hidden_round_4' // New: Hidden Round 4 Start
+    | 'hidden_round_5'; // New: Hidden Round 5 Start
+
+export type ConditionType = 'char_attr' | 'char_card' | 'world_time' | 'world_attr' | 'char_name' | 'loc_name' | 'region_name' | 'history' | 'natural_language' | 'specific_round_type' | 'current_location';
 
 export type Comparator = '>' | '>=' | '=' | '!=' | '<' | '<=';
 export type StringComparator = 'exists' | 'not_exists' | 'contains' | 'exact';
@@ -235,22 +326,62 @@ export interface TriggerCondition {
     // Target Selectors
     locationId?: string; // Location ID or 'all'
     characterId?: string; // Character ID or 'all'
-    targetName?: string; // For Attr name, Card name, Char name, Loc name
+    targetName?: string; // For Attr name, Card name, Char name, Loc name. For natural_language, this holds the description.
     // Logic
     comparator: Comparator | StringComparator;
     value?: string | number; // The threshold
     historyRounds?: number; // For history type
+    
+    // New: Specific Round Type Selector
+    targetRoundTypes?: string[]; // e.g. ['normal', 'hidden_1', 'hidden_2', ...]
+    
+    // New: Current Location Selector
+    targetLocationNames?: string[]; // List of location names to match
+}
+
+// New: Trigger Effects
+export interface TriggerEffect {
+    id: string;
+    type: 'char_attr' | 'char_card' | 'world_attr' | 'trigger_toggle';
+    locationId?: string; // 'all' or ID
+    characterId?: string; // 'all', 'current', or ID
+    
+    // For Attribute (Char & World)
+    targetName?: string; // Attribute name
+    operation?: 'set' | 'add'; // Currently supports direct assignment or addition via expression parsing
+    value?: string; // Value or Expression (e.g. "2a+5" where a is current value)
+
+    // For Card
+    cardOperation?: 'add' | 'remove';
+    cardValue?: string; // JSON string of card IDs (for add) or card names (for remove)
+
+    // For Trigger Toggle
+    triggerOperation?: 'enable' | 'disable';
+    targetTriggerIds?: string[]; // List of Trigger IDs to toggle
 }
 
 export interface Trigger {
     id: string;
     name: string;
-    phase: TriggerPhase;
+    groupId?: string; // New: Group ID for categorization
+    phase: TriggerPhase | TriggerPhase[]; // Updated: Support Multiple Phases
     conditions: TriggerCondition[];
-    urgentRequirement: string; // Appended to prompt
-    systemLog: string; // Added to story
+    disableConditions?: TriggerCondition[]; // New: Conditions to disable this trigger automatically
+    
+    effects?: TriggerEffect[]; // New: Side effects
+    isUrgent?: boolean; // New: If true, requirement is prompt suffix; if false, it's guidance.
+
+    urgentRequirement: string; // Appended to prompt (Now serves as "Requirement Text")
+    systemLog: string; // Added to story (Now Narrative Log) - Fallback
+    narrativeLogs?: string[]; // New: List of possible narrative logs (randomly picked)
     enabled: boolean;
     maxTriggers?: number; // New: Auto-disable after X triggers. -1 means infinite.
+}
+
+export interface TriggerGroup {
+    id: string;
+    name: string;
+    description?: string;
 }
 // ---------------------------
 
@@ -293,6 +424,12 @@ export interface MapLocation {
     terrainType?: TerrainType; // Saved specific terrain type
     avatarUrl?: string; // New: Location Avatar (Blurred abstract image)
     images?: GameImage[]; // Max 4 location images
+    
+    // New: Placeholder info from Story Suggestion
+    pendingExplorationData?: {
+        locationInstruction: string;
+        cultureInstruction: string;
+    };
 }
 
 export interface MapChunk {
@@ -318,6 +455,7 @@ export interface MapState {
     settlements: Record<string, MapSettlement>; // New: Cities and Towns
     charPositions: Record<string, CharPosition>; // CharID -> Pos
     activeLocationId?: string; // The "Play Location" selected by player
+    pendingActiveLocationId?: string; // New: Delayed location switch until settlement
     playerCoordinates: { x: number, y: number }; // Player center
     manualExplorationNext?: boolean; // New: If true, skip AI gen for next exploration
 }
@@ -353,6 +491,8 @@ export interface RoundState {
 
   // Hidden Round Feature
   isHiddenRound?: boolean; // If true, this round is a special hidden round
+  hiddenRoundQueue?: string[][]; // New: Queue of character orders for subsequent hidden rounds
+  hiddenRoundCounter?: number; // New: 1-based counter for current hidden round index
 }
 
 // NEW: Snapshot of Round State for Restoration
@@ -379,10 +519,24 @@ export interface LogEntry {
     images?: GameImage[]; // Images attached to this log entry
 }
 
+export interface StoryTag {
+    id: string;
+    text: string;
+    status: 'neutral' | 'like' | 'dislike';
+    timestamp: number;
+}
+
 export interface WorldState {
   attributes: Record<string, GameAttribute>; // Weather, Mana, etc. (Location removed)
   history: LogEntry[]; // Structured Story Log
   worldGuidance: string; // User-defined direction for AI generation
+  
+  // New Story Suggestion Features
+  lastFunSuggest?: string; // Stores {{FUN_SUGGEST}}
+  storyTags?: StoryTag[]; // Stores all active tags
+  
+  // New: Semantic Trigger Logic
+  activeLanguageConditions?: string[]; // List of fulfilled natural language condition IDs
 }
 
 export type GamePhase = 'init' | 'order' | 'turn_start' | 'char_acting' | 'executing' | 'settlement' | 'round_end';
@@ -444,16 +598,17 @@ export interface ThemeConfig {
 }
 
 export interface ImageSettings {
-    maxShortEdge: number;
-    maxLongEdge: number;
-    compressionQuality: number;
+    maxShortEdge?: number;
+    maxLongEdge?: number;
+    compressionQuality?: number;
 }
 
 export interface AppSettings {
     apiKeys: Record<Provider, string>;
-    maxOutputTokens: number; // Max output tokens for generation (Renamed from maxContextSize)
-    maxInputTokens: number; // New: Estimated max input tokens for context window
-    reactionContextTurns: number; // How many history lines to include for reactions
+    customEndpoints: CustomEndpoint[]; // New: List of custom endpoints
+    maxOutputTokens?: number; // Max output tokens for generation (Renamed from maxContextSize)
+    maxInputTokens?: number; // New: Estimated max input tokens for context window
+    reactionContextTurns?: number; // How many history lines to include for reactions
     devOptionsUnlocked: boolean; // Track if dev options are unlocked in this session
     devPassword?: string; // Password for developer options
     encryptSaveFiles?: boolean; // New: Toggle for save encryption
@@ -461,12 +616,14 @@ export interface AppSettings {
     lockedFeatures: LockedFeatures; // New: Feature locking for end-user distribution
     globalVariables: GlobalVariable[]; // New: Global Text Macros
     storyLogLightMode: boolean; // New: Global Light Mode Toggle
+    storyLogFontSize?: number; // New: Font size for story log (px)
+    storyLogFontWeight?: number; // New: Font weight for story log (100-900)
     
     // History Limit Settings
-    maxHistoryRounds: number; // Rounds of global history to send to AI
-    maxShortHistoryRounds: number; // Rounds of short global history for logic checks
-    maxCharacterMemoryRounds: number; // Rounds of character-specific memory
-    maxEnvMemoryRounds: number; // New: Memory rounds for environment characters
+    maxHistoryRounds?: number; // Rounds of global history to send to AI
+    maxShortHistoryRounds?: number; // Rounds of short global history for logic checks
+    maxCharacterMemoryRounds?: number; // Rounds of character-specific memory
+    maxEnvMemoryRounds?: number; // New: Memory rounds for environment characters
     
     // SPLIT MEMORY DROPOUT SETTINGS
     actionMemoryDropoutProbability?: number; // New: Probability to reduce memory during Action phase (4 rounds)
@@ -486,14 +643,22 @@ export interface AppSettings {
     
     // Auto Scroll Behavior
     autoScrollOnNewLog?: boolean; // Default false. If true, auto-scroll to bottom on new message.
+
+    // Hidden Round Visibility
+    showHiddenRoundContent?: boolean; // Default false. If true, show content even if player is not present.
+    showAvatarsInLog?: boolean; // Default false. If true, show avatars in story log.
 }
 
 export interface GameplaySettings {
-    defaultInitialCP: number;
-    defaultCreationCost: number;
-    defaultInitialAP: number;
+    defaultInitialCP?: number;
+    defaultCreationCost?: number;
+    defaultInitialAP?: number;
     worldTimeScale?: number; // New: Control simulation speed (1 = 1sec/sec)
     maxNPCsPerRound?: number; // New: Max NPCs to activate per round (Default 4)
+    pleasureThresholdLow?: number;
+    pleasureThresholdHigh?: number;
+    pleasureDecayRate?: number;
+    physiqueRecoveryRate?: number;
 }
 
 // New Templates and Prompts structure
@@ -505,27 +670,6 @@ export interface Templates {
         item: Card;
         event: Card;
     };
-}
-
-export interface PromptsConfig {
-    checkCondition: string;
-    checkConditionsBatch: string;
-    checkConditionsStrictInstruction: string; // New field for strict mode instruction
-    determineTurnOrder: string;
-    determineCharacterAction: string;
-    determineCharacterReaction: string;
-    generateLocationDetails: string;
-    analyzeNewConflicts: string;
-    analyzeSettlement: string;
-    generateCharacter: string;
-    generateUnveil: string; // New: Unveil character backstory
-    analyzeTimePassage: string; // Deprecated logic, but kept in config structure for safety
-    // New instruction snippets
-    instruction_generateNewRegion: string;
-    instruction_existingRegionContext: string;
-    context_nearbyCharacters: string;
-    observation: string; // New: Observation prompt
-    generateLetter: string; // New: Letter generation prompt
 }
 
 export interface WeatherType {
@@ -561,7 +705,7 @@ export interface DebugLog {
 }
 
 export interface WindowState {
-    type: 'char' | 'card' | 'settings' | 'world' | 'pool' | 'char_pool' | 'location_pool' | 'dev' | 'char_gen' | 'prize_pool' | 'shop' | 'trigger_pool' | 'letter' | 'theme' | 'location_edit' | 'story_edit' | 'world_composition';
+    type: 'char' | 'card' | 'settings' | 'world' | 'pool' | 'char_pool' | 'location_pool' | 'dev' | 'char_gen' | 'prize_pool' | 'shop' | 'trigger_pool' | 'letter' | 'theme' | 'location_edit' | 'story_edit' | 'world_composition' | 'puzzle' | 'reading_mode' | 'review';
     data?: any;
     id: number;
 }
@@ -574,6 +718,7 @@ export interface GameState {
   cardPool: Card[];
   prizePools: Record<string, PrizePool>; // New: Lottery System
   triggers: Record<string, Trigger>; // New: Trigger System
+  triggerGroups: Record<string, TriggerGroup>; // New: Trigger Groups
   judgeConfig?: AIConfig; // Global AI for judging world effects
   charGenConfig?: AIConfig; // NEW: Dedicated AI for Character Generation
   charBehaviorConfig?: AIConfig; // NEW: Dedicated AI for Character Action/Reaction
@@ -619,9 +764,7 @@ export interface AICommand {
     oldCardId?: string;
     newCard?: Card;
 
-    // Dynamic Effect Overrides (New)
-    // Map effect index (0, 1, 2...) to a specific value determined by the Roleplay AI
-    effectOverrides?: Record<number, string | number>;
+    // (Removed effectOverrides)
 }
 
 export interface TurnAction {
@@ -635,4 +778,9 @@ export interface TurnAction {
     generatedDrives?: Array<{ targetCharId: string, drive: Drive }>;
     // Fallback for raw AI response
     text?: string;
+    // New: Secrets generated by AI
+    generatedSecrets?: Array<{ question: string, correctAnswer: string, wrongAnswerA: string, wrongAnswerB: string }>;
+    
+    // New: Character's Move Intention/Plan
+    movePlan?: string; 
 }

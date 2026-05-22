@@ -1,13 +1,14 @@
 
 import { MutableRefObject } from 'react';
-import { GameState, Character, MapLocation, Card, AttributeType, AttributeVisibility } from '../../types';
+import { GameState, Character, MapLocation, Card, AttributeType, AttributeVisibility, Effect } from '../../types';
 import { normalizeCard } from '../../services/aiService';
 import { getAttr, getCP, removeInstances } from '../../services/attributeUtils';
+import { generateCardId, generateConflictId, generateEffectId } from '../../services/idUtils';
 
 interface UseWorldActionsProps {
     stateRef: MutableRefObject<GameState>;
     updateState: (updater: (current: GameState) => GameState) => void;
-    addLog: (text: string) => void;
+    addLog: (text: string, overrides?: any) => void;
 }
 
 export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActionsProps) => {
@@ -19,18 +20,18 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
         
         // Validation handled by caller mostly, but double check
         if (!char || !dest) {
-            addLog(`> 移动失败: 目标地点无效。`);
+            addLog(`> 目标地点无效。`);
             return;
         }
 
-        // --- Physique Check (Threshold: 50) ---
+        // --- Physique Check (Threshold: 30) ---
         // Environment characters (env_*) bypass this check to ensure story progression.
         if (!char.id.startsWith('env_')) {
             const physiqueAttr = getAttr(char, '体能');
             const physiqueVal = physiqueAttr ? Number(physiqueAttr.value) : 0;
             
-            if (!isNaN(physiqueVal) && physiqueVal < 50) {
-                addLog(`> 行动拒绝: ${char.name} 体能不足 (${physiqueVal}/50)，身体过于疲惫，无法长途跋涉。`);
+            if (!isNaN(physiqueVal) && physiqueVal < 30) {
+                addLog(`> ${char.name} 体能不足 (${physiqueVal}/30)，身体过于疲惫，无法移动至其它地点。`);
                 return;
             }
         }
@@ -56,24 +57,21 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
             // ---------------------------------------------
             
             // Add conflict on move
-            let maxId = 0;
-            Object.values(prev.characters).forEach(c => {
-                c.conflicts?.forEach(x => {
-                    const n = parseInt(x.id);
-                    if (!isNaN(n) && n > maxId) maxId = n;
-                });
-            });
-            const nextId = maxId + 1;
+            const newConflictId = generateConflictId(movingChar.conflicts || []);
 
             movingChar.conflicts = [
                 ...(movingChar.conflicts || []),
                 {
-                    id: String(nextId),
+                    id: newConflictId,
                     desc: "刚到此地，对当地情况不熟悉",
                     apReward: 2,
                     solved: false
                 }
             ];
+
+            // Clear Move Plan upon execution
+            movingChar.movePlan = undefined;
+
             newChars[charId] = movingChar;
 
             const newMap = { ...prev.map };
@@ -100,7 +98,8 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
         
         const isUnknown = !dest.isKnown;
         const nameToLog = destinationName || dest.name;
-        addLog(`> 移动: ${char.name} 前往了 ${isUnknown ? "未知地点" : `[${nameToLog}]`}`);
+        // Updated: Log as ACTION type so AI sees it in history
+        addLog(`${char.name} 移动前往了 ${isUnknown ? "未知地点" : `[${nameToLog}]`}`, { type: 'action', actingCharId: charId });
     };
 
     const processCardCreation = (charId: string, cardTemplate: Card) => {
@@ -108,7 +107,7 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
         const char = state.characters[charId];
         if (!char) return;
 
-        const cost = state.defaultSettings.gameplay.defaultCreationCost;
+        const cost = state.defaultSettings.gameplay.defaultCreationCost ?? 20;
         const currentCP = getCP(char);
 
         if (currentCP >= cost) {
@@ -122,12 +121,27 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
                 
                 const finalCardCost = Math.max(1, Math.floor(cost / 2));
 
+                // FIX: Ensure default effects for active cards if missing
+                const effectiveEffects: Effect[] = (cardTemplate.effects && cardTemplate.effects.length > 0) 
+                    ? cardTemplate.effects 
+                    : (cardTemplate.triggerType === 'active' || cardTemplate.triggerType === 'reaction' 
+                        ? [{
+                            id: generateEffectId(new Set()), // Isolated creation, assume unique enough for single use
+                            name: "基础效果",
+                            targetType: 'specific_char' as const,
+                            targetAttribute: '健康',
+                            value: 0,
+                            conditionDescription: "无",
+                            conditionContextKeys: []
+                          }]
+                        : []);
+
                 const finalCard = existing || normalizeCard({ 
                     ...cardTemplate, 
                     itemType: cardTemplate.itemType || 'skill',
                     triggerType: cardTemplate.triggerType || 'active',
-                    effects: cardTemplate.effects || [],
-                    id: `card_gen_${Date.now()}`,
+                    effects: effectiveEffects,
+                    id: generateCardId(state.cardPool),
                     description: newDesc,
                     cost: finalCardCost 
                 });
@@ -165,10 +179,10 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
                     };
                 });
                 
-                addLog(`> 创造: ${char.name} 领悟了技能 [${finalCard.name}] (-${cost} CP) 并加入了背包。${existing ? '(复用现有技能)' : ''}`);
+                addLog(`> ${char.name} 领悟了技能 [${finalCard.name}] (-${cost} CP) 并加入了背包。${existing ? '(复用现有技能)' : ''}`);
             }
         } else {
-            addLog(`> 创造失败: ${char.name} 想要创造 [${cardTemplate.name}] 但 CP 不足。`);
+            addLog(`> ${char.name} 想要领悟 [${cardTemplate.name}] 但创造点数不足。`);
         }
     };
 
@@ -177,10 +191,32 @@ export const useWorldActions = ({ stateRef, updateState, addLog }: UseWorldActio
         const targetChar = state.characters[targetCharId];
         
         if (targetChar && targetChar.inventory.includes(oldCardId)) {
+            // Used for unique effect generation
+            const tempEffectIds = new Set<string>();
+
+            // Fix: ensure effects exist here too if needed
+            const effectiveEffects = (newCardTemplate.effects && newCardTemplate.effects.length > 0)
+                ? newCardTemplate.effects
+                : (newCardTemplate.triggerType === 'active' || newCardTemplate.triggerType === 'reaction'
+                    ? [{
+                        id: generateEffectId(tempEffectIds),
+                        name: "基础效果",
+                        targetType: 'specific_char' as const,
+                        targetAttribute: '健康',
+                        value: 0,
+                        conditionDescription: "无",
+                        conditionContextKeys: []
+                      }]
+                    : []);
+
             let realCard: Card = {
                 ...newCardTemplate,
-                id: `card_redeem_${Date.now()}`,
-                effects: (newCardTemplate.effects || []).map((e, idx) => ({...e, id: `eff_rd_${Date.now()}_${idx}`}))
+                id: generateCardId(state.cardPool), // New card from redemption
+                effects: effectiveEffects.map((e: any) => {
+                     const eid = generateEffectId(tempEffectIds);
+                     tempEffectIds.add(eid);
+                     return {...e, id: eid};
+                })
             };
             realCard = normalizeCard(realCard);
 

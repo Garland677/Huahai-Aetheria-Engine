@@ -1,7 +1,25 @@
 
 import { useMemo } from 'react';
-import { GameState, Character, Card } from '../types';
+import { GameState, Character, Card, AttributeVisibility } from '../types';
 import { PendingAction } from './useEngine';
+
+const VIRTUAL_ACTION_CARD: Card = {
+    id: 'virtual_action_card',
+    name: '动作',
+    description: '使用者的自由动作',
+    itemType: 'skill',
+    triggerType: 'active',
+    cost: 0,
+    effects: [],
+    visibility: AttributeVisibility.PUBLIC,
+    isVirtualAction: true
+};
+
+const MERGE_TARGET_IDS = [
+    'card_interact_default',
+    'card_trade_default',
+    'card_acquire_default'
+];
 
 export const usePlayerCards = (
     state: GameState,
@@ -57,19 +75,24 @@ export const usePlayerCards = (
         });
 
         // 3. Combine and Sort
-        const all = [...skills, ...inventoryItems].sort((a, b) => {
+        let all = [...skills, ...inventoryItems].sort((a, b) => {
             if (a.isInnate && !b.isInnate) return -1;
             if (!a.isInnate && b.isInnate) return 1;
-            const nameComp = a.card.name.localeCompare(b.card.name);
+            const nameComp = (a.card.name || '').localeCompare(b.card.name || '');
             if (nameComp !== 0) return nameComp;
             return (a.card.description || "").localeCompare(b.card.description || "");
         });
+        
+        // 4. Hide specific system cards (Interact, Trade, Acquire) 
+        // Players only use the unified Action inputs directly.
+        all = all.filter(w => !MERGE_TARGET_IDS.includes(w.card.id));
 
         return all.map(wrapper => wrapper.card);
     }, [activeChar, state.cardPool, pendingCounts]);
 
     // Check if card needs target
     const doesCardNeedTarget = (card: Card) => {
+        if (card.isVirtualAction) return true; // Always needs target
         if (card.name === '互动' || card.name === 'Interact') return true;
         if (card.effects && card.effects.length > 0) {
             return card.effects.some(e => e.targetType === 'specific_char');

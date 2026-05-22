@@ -1,12 +1,17 @@
 
+
 import React, { useEffect, useRef } from 'react';
-import { GameState, Character, LogEntry, Provider } from '../../types';
+import { GameState, Character, LogEntry, Provider, Card, AttributeType, AttributeVisibility } from '../../types';
 import { createInitialGameState } from '../../services/gameFactory';
 import { fetchNetworkTime } from '../../services/networkUtils';
 import { encryptData, decryptData } from '../../services/cryptoService';
-import { getCharacterMemory } from '../../services/aiService';
+import { extractCharacterHistory } from '../../services/ai/memoryUtils';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { App } from '@capacitor/app';
+import { generateCharacterId, generateCardId } from '../../services/idUtils';
+import { storage } from '../../services/storageService';
+import { imageStorage } from '../../services/imageStorage';
 
 export const AUTOSAVE_KEY = 'aetheria_autosave_v1';
 
@@ -21,23 +26,150 @@ export const useGamePersistence = (
     forceClearReactionRequest: () => void
 ) => {
 
-  // OPTIMIZED AUTOSAVE: Run on interval rather than state dependency
+  // --- CORE SAVE LOGIC (Async via IndexedDB) ---
+  const persistState = async () => {
+      try {
+          const s = stateRef.current;
+          // Valid check: Ensure round exists and game has actually started (Round >= 1)
+          if (s && s.round && s.round.roundNumber >= 1) {
+              
+              // DEHYDRATE: Convert Runtime Blob URLs -> Persisted IDs
+              // For AutoSave, we only save references to keep it light and use local DB
+              const dehydratedState = imageStorage.dehydrateState(s);
+              
+              await storage.setItem(AUTOSAVE_KEY, dehydratedState);
+              // console.log(`[AutoSave] Saved to IndexedDB at ${new Date().toLocaleTimeString()}`);
+          }
+      } catch (e) {
+          console.error("Autosave failed:", e);
+      }
+  };
+
+  // --- LOADING LOGIC ---
   useEffect(() => {
-      const saveInterval = setInterval(() => {
+      const loadState = async () => {
           try {
-              // Read from ref to avoid dependency cycle and excessive re-renders
-              const s = stateRef.current;
-              if (s.round && s.round.roundNumber >= 1) {
-                  localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(s));
-                  // console.debug("Autosave triggered"); // Optional debug
+              // Clear legacy localStorage if it exists to free space
+              if (localStorage.getItem(AUTOSAVE_KEY)) {
+                  console.log("Migrating/Clearing legacy localStorage save...");
+                  localStorage.removeItem(AUTOSAVE_KEY);
+              }
+
+              // Load from IndexedDB
+              const savedRaw = await storage.getItem<GameState>(AUTOSAVE_KEY);
+              
+              if (savedRaw) {
+                  // HYDRATE: Convert Persisted IDs / Legacy Base64 -> Runtime Blob URLs
+                  // This also migrates legacy data on the fly
+                  const saved = await imageStorage.hydrateState(savedRaw);
+
+                  if (saved && saved.world && saved.map && saved.characters) {
+                      // Snapshot current parsed state for the resume log
+                      const resumeSnapshot = saved.round ? JSON.parse(JSON.stringify(saved.round)) : undefined;
+                      
+                      const resumeLog: LogEntry = {
+                          id: `log_resume_${Date.now()}`,
+                          round: saved.round?.roundNumber || 1,
+                          turnIndex: saved.round?.turnIndex || 0,
+                          content: "系统: 检测到自动存档，已恢复上次的游戏进度。",
+                          timestamp: Date.now(),
+                          type: 'system',
+                          snapshot: resumeSnapshot
+                      };
+                      if (!saved.world.history) saved.world.history = [];
+                      saved.world.history.push(resumeLog);
+                      
+                      // Migrations...
+                      if (!saved.prizePools) saved.prizePools = createInitialGameState().prizePools;
+                      if (!saved.triggers) saved.triggers = {};
+                      if (!saved.triggerGroups) saved.triggerGroups = {}; // Migration
+                      
+                      if (!saved.charGenConfig) saved.charGenConfig = saved.judgeConfig || createInitialGameState().charGenConfig;
+                      if (!saved.charBehaviorConfig) saved.charBehaviorConfig = saved.judgeConfig || createInitialGameState().charBehaviorConfig;
+                      if (saved.prizePools) {
+                          Object.values(saved.prizePools).forEach((pool: any) => {
+                              if (!pool.locationIds) pool.locationIds = [];
+                          });
+                      }
+                      if (!saved.appSettings.maxHistoryRounds) saved.appSettings.maxHistoryRounds = 20;
+                      if (!saved.appSettings.maxCharacterMemoryRounds) saved.appSettings.maxCharacterMemoryRounds = 20;
+                      if (!saved.appSettings.maxShortHistoryRounds) saved.appSettings.maxShortHistoryRounds = 5;
+                      if (!saved.appSettings.globalVariables) saved.appSettings.globalVariables = [];
+                      if (saved.appSettings.storyLogLightMode === undefined) saved.appSettings.storyLogLightMode = false;
+                      if (saved.round.autoReaction === undefined) saved.round.autoReaction = false; 
+                      if (saved.round.isWorldTimeFlowPaused === undefined) saved.round.isWorldTimeFlowPaused = false;
+                      
+                      if ((saved.appSettings as any).memoryDropoutProbability !== undefined) {
+                          if (saved.appSettings.reactionMemoryDropoutProbability === undefined) {
+                              saved.appSettings.reactionMemoryDropoutProbability = (saved.appSettings as any).memoryDropoutProbability;
+                          }
+                          delete (saved.appSettings as any).memoryDropoutProbability;
+                      }
+                      if (saved.appSettings.actionMemoryDropoutProbability === undefined) {
+                          saved.appSettings.actionMemoryDropoutProbability = 0.34;
+                      }
+                      if (saved.appSettings.reactionMemoryDropoutProbability === undefined) {
+                          saved.appSettings.reactionMemoryDropoutProbability = 0.34;
+                      }
+
+                      // Apply Loaded State
+                      updateState(() => saved);
+                  }
               }
           } catch (e) {
-              console.error("Autosave failed (likely quota exceeded):", e);
+              console.warn("Failed to load autosave from IndexedDB:", e);
           }
-      }, 30000); // 30 Seconds Interval
+      };
+      
+      loadState();
+  }, []);
 
+  // --- STRATEGY 1: INTERVAL (Backup) ---
+  useEffect(() => {
+      const saveInterval = setInterval(() => {
+          persistState();
+      }, 30000);
       return () => clearInterval(saveInterval);
-  }, []); // Empty dependency ensures it runs once on mount
+  }, []); 
+
+  // --- STRATEGY 2: LIFECYCLE EVENTS (Crucial for Mobile) ---
+  useEffect(() => {
+      const handleVisChange = () => {
+          if (document.hidden) {
+              console.log("[Persistence] App hidden, forcing save...");
+              persistState();
+          }
+      };
+      
+      const handlePageHide = () => {
+          persistState();
+      };
+
+      document.addEventListener('visibilitychange', handleVisChange);
+      window.addEventListener('pagehide', handlePageHide);
+      window.addEventListener('beforeunload', handlePageHide);
+
+      let nativeListener: any = null;
+      if (Capacitor.isNativePlatform()) {
+          App.addListener('appStateChange', (state) => {
+              if (!state.isActive) {
+                  console.log("[Persistence] Native App paused, forcing save...");
+                  persistState();
+              }
+          }).then(handle => {
+              nativeListener = handle;
+          });
+      }
+
+      return () => {
+          document.removeEventListener('visibilitychange', handleVisChange);
+          window.removeEventListener('pagehide', handlePageHide);
+          window.removeEventListener('beforeunload', handlePageHide);
+          if (nativeListener) {
+               if (typeof nativeListener.remove === 'function') nativeListener.remove();
+          }
+      };
+  }, []);
 
   const onSaveClick = () => {
       setSaveLoadModal({ type: 'save', isOpen: true });
@@ -48,9 +180,6 @@ export const useGamePersistence = (
       if (!file) return;
       
       setSaveLoadModal({ type: 'load', isOpen: true, fileToLoad: file, error: undefined });
-      
-      // CRITICAL FIX: Reset the input value so the same file can be selected again
-      // Without this, selecting the same file twice won't trigger onChange
       e.target.value = ''; 
   };
 
@@ -62,7 +191,10 @@ export const useGamePersistence = (
       customFilename?: string,
       expirationDateOverride?: string
   ) => {
-      const s = stateRef.current;
+      // EXPORT: Fully resolve images to Base64 to make the save file portable
+      // This ensures images are not lost when transferring save files or clearing DB
+      const s = await imageStorage.exportState(stateRef.current);
+      
       const exportData: any = {};
       exportData.timestamp = Date.now();
       
@@ -73,25 +205,34 @@ export const useGamePersistence = (
           exportData.cardPool = s.cardPool;
           exportData.prizePools = s.prizePools;
           exportData.triggers = s.triggers;
+          exportData.triggerGroups = s.triggerGroups; // Save Groups
           exportData.debugLogs = []; // Do not save debug logs to file
           exportData.map = s.map;
       }
 
-      // Settings without model config and api keys (General Settings)
       if (includeSettings) {
           const settingsToSave = { ...s.appSettings };
-          // Remove keys and password (handled separately or in model interface)
-          settingsToSave.apiKeys = { [Provider.XAI]: '', [Provider.GEMINI]: '', [Provider.VOLCANO]: '', [Provider.OPENROUTER]: '', [Provider.OPENAI]: '', [Provider.CLAUDE]: '' };
+          settingsToSave.apiKeys = { 
+              [Provider.XAI]: '', 
+              [Provider.GEMINI]: '', 
+              [Provider.VOLCANO]: '', 
+              [Provider.OPENROUTER]: '', 
+              [Provider.OPENAI]: '', 
+              [Provider.CLAUDE]: '',
+              [Provider.CUSTOM]: ''
+          };
           settingsToSave.devPassword = "";
-          // Lock state is reset on load anyway, but we save current state for completeness if needed later
           settingsToSave.devOptionsUnlocked = false; 
-          
-          // Remove Theme Config (Theme is local/user preference, not save-bound)
           delete (settingsToSave as any).themeConfig;
-          
-          // Security Update: Remove Locked Features from General Settings
-          // They should only be saved if includeDevPassword (Security) is checked.
           delete (settingsToSave as any).lockedFeatures;
+          
+          // Exclude Font Settings from save file
+          delete (settingsToSave as any).storyLogFontSize;
+          delete (settingsToSave as any).storyLogFontWeight;
+
+          // **FIX: Exclude customEndpoints from General Settings**
+          // They belong to Model Interface now
+          delete (settingsToSave as any).customEndpoints;
 
           if (expirationDateOverride !== undefined) {
               settingsToSave.saveExpirationDate = expirationDateOverride;
@@ -102,25 +243,23 @@ export const useGamePersistence = (
           exportData.devMode = s.devMode;
       }
 
-      // Model Interface (API Keys + Model Configs)
       if (includeModelInterface) {
-          // Initialize appSettings if not present (from includeSettings)
           if (!exportData.appSettings) exportData.appSettings = {};
-          
           exportData.appSettings.apiKeys = s.appSettings.apiKeys;
+          
+          // **FIX: Include customEndpoints here**
+          exportData.appSettings.customEndpoints = s.appSettings.customEndpoints;
+
           exportData.judgeConfig = s.judgeConfig;
           exportData.charGenConfig = s.charGenConfig; 
           exportData.charBehaviorConfig = s.charBehaviorConfig; 
       }
 
-      // Developer Password & Security Settings (Coupled with Model Interface or Global Context)
       if (includeModelInterface || includeGlobalContext) {
           if (!exportData.appSettings) exportData.appSettings = {};
           exportData.appSettings.devPassword = s.appSettings.devPassword;
-          // Also save security settings to ensure consistency when password is saved
           exportData.appSettings.encryptSaveFiles = s.appSettings.encryptSaveFiles;
           exportData.appSettings.saveExpirationDate = s.appSettings.saveExpirationDate;
-          // Force save Locked Features with security settings
           exportData.appSettings.lockedFeatures = s.appSettings.lockedFeatures;
       }
 
@@ -197,6 +336,97 @@ export const useGamePersistence = (
       setSaveLoadModal({ ...saveLoadModal, isOpen: false });
   };
 
+  const executeLoad = async (
+      includeProgress: boolean,
+      includeSettings: boolean,
+      includeModelInterface: boolean,
+      includeGlobalContext: boolean,
+      data: any
+  ) => {
+      if (!data) return;
+
+      const newState: GameState = { ...stateRef.current };
+
+      if (includeProgress) {
+          // Hydrate the incoming data first
+          // This will extract base64 images from JSON, save to DB, and return Blob URLs
+          const hydratedData = await imageStorage.hydrateState(data);
+
+          if (hydratedData.world) newState.world = hydratedData.world;
+          if (hydratedData.round) newState.round = hydratedData.round;
+          if (hydratedData.characters) newState.characters = hydratedData.characters;
+          if (hydratedData.cardPool) newState.cardPool = hydratedData.cardPool;
+          if (hydratedData.prizePools) newState.prizePools = hydratedData.prizePools;
+          if (hydratedData.triggers) newState.triggers = hydratedData.triggers;
+          if (hydratedData.triggerGroups) newState.triggerGroups = hydratedData.triggerGroups; // Load Groups
+          if (hydratedData.map) newState.map = hydratedData.map;
+          
+          if (!newState.prizePools) newState.prizePools = createInitialGameState().prizePools;
+          if (!newState.triggers) newState.triggers = {};
+          if (!newState.triggerGroups) newState.triggerGroups = {}; // Fallback
+      }
+
+      if (includeSettings) {
+          if (data.appSettings) {
+              const loadedSettings = { ...data.appSettings };
+              
+              if (!includeModelInterface) {
+                  // If we are NOT loading Model Interface, we should keep current keys AND endpoints
+                  loadedSettings.apiKeys = newState.appSettings.apiKeys;
+                  // **FIX: Explicitly remove customEndpoints from settings load to prevent overwriting existing ones with old data if Model Interface is unchecked**
+                  delete loadedSettings.customEndpoints; 
+              }
+              
+              loadedSettings.themeConfig = newState.appSettings.themeConfig;
+              
+              // Preserve Font Settings from local state
+              loadedSettings.storyLogFontSize = newState.appSettings.storyLogFontSize;
+              loadedSettings.storyLogFontWeight = newState.appSettings.storyLogFontWeight;
+              
+              newState.appSettings = { ...newState.appSettings, ...loadedSettings };
+              
+              if (data.defaultSettings) newState.defaultSettings = data.defaultSettings;
+              if (data.devMode !== undefined) newState.devMode = data.devMode;
+          }
+      }
+
+      if (includeModelInterface) {
+          if (data.appSettings && data.appSettings.apiKeys) {
+               newState.appSettings = { ...newState.appSettings, apiKeys: data.appSettings.apiKeys };
+          }
+
+          // **FIX: Load customEndpoints here**
+          if (data.appSettings && data.appSettings.customEndpoints) {
+              newState.appSettings = { 
+                  ...newState.appSettings, 
+                  customEndpoints: data.appSettings.customEndpoints 
+              };
+          }
+
+          if (data.judgeConfig) newState.judgeConfig = data.judgeConfig;
+          if (data.charGenConfig) newState.charGenConfig = data.charGenConfig;
+          if (data.charBehaviorConfig) newState.charBehaviorConfig = data.charBehaviorConfig;
+          
+          if (data.appSettings && data.appSettings.devPassword) {
+              newState.appSettings.devPassword = data.appSettings.devPassword;
+          }
+      }
+
+      if (includeGlobalContext) {
+          if (data.globalContext) newState.globalContext = data.globalContext;
+      }
+
+      if (!newState.charGenConfig && newState.judgeConfig) newState.charGenConfig = newState.judgeConfig;
+      if (!newState.charBehaviorConfig && newState.judgeConfig) newState.charBehaviorConfig = newState.judgeConfig;
+
+      // Force autosave immediately via IndexedDB (will dehydrate automatically)
+      persistState().catch(console.error);
+      
+      updateState(() => newState);
+      addLog("系统: 存档加载成功。");
+      setSaveLoadModal({ ...saveLoadModal, isOpen: false });
+  };
+
   const parseAndValidateSave = async (file: File): Promise<any> => {
       return new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -223,7 +453,7 @@ export const useGamePersistence = (
                           setPasswordChallenge({
                               isOpen: true,
                               message: msg,
-                              expectedPassword: expectedPwd, // Pass expected password for local check
+                              expectedPassword: expectedPwd, 
                               resolve: (val: string | null) => resolvePrompt(val)
                           });
                       });
@@ -255,7 +485,7 @@ export const useGamePersistence = (
                               }
                           } catch (e: any) {
                               if (e.message === "UserCancelled") {
-                                  throw e; // Propagate cancel
+                                  throw e; 
                               }
                               if (e.message.includes("Expired & Invalid Password")) {
                                   throw e;
@@ -283,183 +513,127 @@ export const useGamePersistence = (
       });
   };
 
-  const executeLoad = async (
-      includeProgress: boolean, 
-      includeSettings: boolean, 
-      includeModelInterface: boolean,
-      includeGlobalContext: boolean,
-      preloadedData?: any // Accept preloaded data to avoid re-parsing
-  ) => {
-      forceClearReactionRequest(); // Clear blocked UI
+  const importCharacters = async (charsToImport: Character[], sourceHistory: LogEntry[] = [], keepMemory: boolean = false, memoryRounds: number = 20, sourceCardPool: Card[] = []) => {
       
-      let json = preloadedData;
-      
-      // If no preloaded data, try to parse file again (legacy fallback)
-      if (!json) {
-          const file = saveLoadModal.fileToLoad;
-          if (!file) return;
-          try {
-              json = await parseAndValidateSave(file);
-          } catch (e: any) {
-              // Handle User Cancel silently for executeLoad context, or show error
-              if (e.message !== "UserCancelled") {
-                  console.error("Load failed during execute:", e);
-                  setSaveLoadModal((prev: any) => ({ ...prev, error: `加载失败: ${e.message}` }));
-              }
-              return;
-          }
-      }
+      // Hydrate imported characters before merging (in case they have ID references)
+      const hydratedChars = await imageStorage.hydrateState(charsToImport);
+      const hydratedHistory = await imageStorage.hydrateState(sourceHistory);
+      const hydratedCardPool = await imageStorage.hydrateState(sourceCardPool);
 
-      setSaveLoadModal((prev: any) => ({ ...prev, error: undefined }));
-
-      try {
-          // If we reach here, 'json' is valid
-          updateState(prev => {
-              const newState = { ...prev };
-
-              // 1. Settings (General)
-              if (includeSettings && json.appSettings) {
-                  
-                  // Keep existing keys/pwd if NOT loading model interface/forced pwd
-                  // But since we are constructing a new object, we start with defaults + json
-                  const baseSettings = {
-                      ...createInitialGameState().appSettings,
-                      ...json.appSettings,
-                      
-                      // Security Fix: Locked Features should NOT be loaded via General Settings.
-                      // They are either preserved from current session (if not security loading)
-                      // or overwritten by Step 5 (if security loading).
-                      // This ensures that loading a "General Settings" file doesn't accidentally
-                      // enable/disable restrictions unless authorized by password.
-                      lockedFeatures: prev.appSettings.lockedFeatures,
-
-                      globalVariables: json.appSettings.globalVariables || [],
-                      // Retain existing sensitive data if not explicitly overwritten later
-                      apiKeys: prev.appSettings.apiKeys, 
-                      devPassword: prev.appSettings.devPassword,
-                      // FORCE preserve current theme config (do not load from file)
-                      themeConfig: prev.appSettings.themeConfig
-                  };
-                  
-                  newState.appSettings = baseSettings;
-                  if (json.defaultSettings) newState.defaultSettings = json.defaultSettings;
-                  if (json.devMode !== undefined) newState.devMode = json.devMode;
-              }
-
-              // 2. Model Interface (API Keys + Model Configs)
-              if (includeModelInterface) {
-                  if (json.appSettings && json.appSettings.apiKeys) {
-                      newState.appSettings = { 
-                          ...newState.appSettings, 
-                          apiKeys: json.appSettings.apiKeys 
-                      };
-                  }
-                  if (json.judgeConfig) newState.judgeConfig = json.judgeConfig;
-                  if (json.charGenConfig) newState.charGenConfig = json.charGenConfig; 
-                  if (json.charBehaviorConfig) newState.charBehaviorConfig = json.charBehaviorConfig; 
-              }
-
-              // 3. Global Context
-              if (includeGlobalContext && json.globalContext) {
-                  newState.globalContext = json.globalContext;
-              }
-
-              // 4. Progress
-              if (includeProgress) {
-                  if (json.world) newState.world = json.world;
-                  if (json.map) newState.map = json.map;
-                  if (json.round) newState.round = json.round;
-                  if (json.characters) newState.characters = json.characters;
-                  if (json.cardPool) newState.cardPool = json.cardPool;
-                  if (json.prizePools) newState.prizePools = json.prizePools;
-                  if (json.triggers) newState.triggers = json.triggers;
-                  if (json.debugLogs) newState.debugLogs = json.debugLogs;
-              }
-
-              // 5. Force Load Developer Password & Security Settings & LOCKED FEATURES Logic
-              // If loading any config (Settings, Model, or Context) AND password exists in file -> Force Load
-              if ((includeSettings || includeModelInterface || includeGlobalContext) && json.appSettings?.devPassword) {
-                  newState.appSettings = {
-                      ...newState.appSettings,
-                      devPassword: json.appSettings.devPassword,
-                      // Force load security settings to prevent security bypass
-                      encryptSaveFiles: json.appSettings.encryptSaveFiles ?? newState.appSettings.encryptSaveFiles,
-                      saveExpirationDate: json.appSettings.saveExpirationDate ?? newState.appSettings.saveExpirationDate,
-                      // Force load Locked Features (Security-bound)
-                      // If undefined in JSON (e.g. older save), keep current/default.
-                      lockedFeatures: json.appSettings.lockedFeatures ?? newState.appSettings.lockedFeatures
-                  };
-              }
-
-              // 6. Lock Developer Options on Load
-              newState.appSettings = {
-                  ...newState.appSettings,
-                  devOptionsUnlocked: false
-              };
-
-              const logId = `log_load_${Date.now()}`;
-              const loadLog: LogEntry = {
-                  id: logId,
-                  round: newState.round.roundNumber,
-                  turnIndex: newState.round.turnIndex,
-                  content: `系统: 游戏数据已加载`,
-                  timestamp: Date.now(),
-                  type: 'system',
-                  snapshot: newState.round
-              };
-              if(!newState.world.history) newState.world.history = [];
-              newState.world.history.push(loadLog);
-
-              return newState;
-          });
-
-          setSaveLoadModal({ ...saveLoadModal, isOpen: false });
-          addLog("系统: 加载成功。");
-
-      } catch (e: any) {
-          console.error("Load failed:", e);
-          setSaveLoadModal((prev: any) => ({ ...prev, error: `加载失败: ${e.message}` }));
-      }
-  };
-
-  const importCharacters = (charsToImport: Character[], sourceHistory: LogEntry[] = [], keepMemory: boolean = false, memoryRounds: number = 20) => {
       updateState(prev => {
           const newChars = { ...prev.characters };
           const newPositions = { ...prev.map.charPositions };
           const activeLocId = prev.map.activeLocationId || 'loc_start_0_0';
           const targetLoc = prev.map.locations[activeLocId];
           
-          let importedCount = 0;
+          const usedCharIds = new Set(Object.keys(newChars));
+          const usedCardIds = new Set(prev.cardPool.map(c => c.id));
+          
+          const newPoolCards: Card[] = [];
 
-          charsToImport.forEach(char => {
+          hydratedChars.forEach((char: Character) => {
+              const oldId = char.id;
+              
+              const newId = generateCharacterId(usedCharIds);
+              usedCharIds.add(newId);
+              
               const newChar = JSON.parse(JSON.stringify(char));
-              
-              if (newChars[newChar.id]) {
-                  newChar.id = `${newChar.id}_imp_${Date.now()}`;
-              }
-              
+              newChar.id = newId;
+
               if (newChar.conflicts) {
                   newChar.conflicts.forEach((c: any) => c.solved = false);
               }
 
-              if (keepMemory && sourceHistory.length > 0) {
-                  const originalId = char.id; 
-                  const memory = getCharacterMemory(sourceHistory, originalId, undefined, memoryRounds);
-                  if (memory) {
-                      const memoryBlock = `\n\n[该角色的前世记忆：${memoryRounds}轮]\n${memory}`;
-                      newChar.description = (newChar.description || "") + memoryBlock;
+              if (newChar.skills) {
+                  newChar.skills = newChar.skills.map((skill: Card) => {
+                       const newSkillId = generateCardId(usedCardIds);
+                       usedCardIds.add(newSkillId);
+                       return { ...skill, id: newSkillId };
+                  });
+              }
+
+              if (!keepMemory) {
+                  newChar.useAiOverride = false;
+                  newChar.aiConfig = undefined;
+                  newChar.contextConfig = { messages: [] };
+                  newChar.lifeTrajectory = { past: "", current: "", future: "" };
+                  newChar.mailHistory = [];
+                  newChar.secrets = [];
+                  newChar.conflicts = []; 
+                  newChar.drives = []; 
+                  newChar.previousLifeLogs = [];
+                  
+                  newChar.memoryConfig = {
+                      useOverride: false,
+                      maxMemoryRounds: 10,
+                      actionDropoutProbability: 0.34,
+                      reactionDropoutProbability: 0.34
+                  };
+
+                  newChar.inventory = [];
+
+                  newChar.attributes = {
+                       '创造点': { id: '创造点', name: '创造点', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC },
+                       '健康': { id: '健康', name: '健康', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC },
+                       '体能': { id: '体能', name: '体能', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC },
+                       '活跃': { id: '活跃', name: '活跃', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC },
+                       '快感': { id: '快感', name: '快感', type: AttributeType.NUMBER, value: 50, visibility: AttributeVisibility.PUBLIC },
+                       '状态': { id: '状态', name: '状态', type: AttributeType.TEXT, value: '正常', visibility: AttributeVisibility.PUBLIC },
+                  };
+                  
+              } else {
+                  if (newChar.inventory && hydratedCardPool.length > 0) {
+                      const newInventory: string[] = [];
+                      newChar.inventory.forEach((oldItemId: string) => {
+                          const originalCard = hydratedCardPool.find((c: Card) => c.id === oldItemId);
+                          if (originalCard) {
+                               const newItemId = generateCardId(usedCardIds);
+                               usedCardIds.add(newItemId);
+                               
+                               const newCard = { ...originalCard, id: newItemId };
+                               newPoolCards.push(newCard); 
+                               newInventory.push(newItemId);
+                          } else {
+                              const existingInCurrent = prev.cardPool.find(c => c.id === oldItemId);
+                              if (existingInCurrent) {
+                                  const newItemId = generateCardId(usedCardIds);
+                                  usedCardIds.add(newItemId);
+                                  const newCard = { ...existingInCurrent, id: newItemId };
+                                  newPoolCards.push(newCard);
+                                  newInventory.push(newItemId);
+                              }
+                          }
+                      });
+                      newChar.inventory = newInventory;
+                  } else if (newChar.inventory) {
+                      newChar.inventory = [];
+                  }
+
+                  if (hydratedHistory.length > 0) {
+                      const extractedHistory = extractCharacterHistory(hydratedHistory, oldId);
+                      let combinedLogs = [...(newChar.previousLifeLogs || []), ...extractedHistory];
+                      
+                      let maxRound = 0;
+                      combinedLogs.forEach(l => {
+                          if (l.round > maxRound) maxRound = l.round;
+                      });
+
+                      combinedLogs = combinedLogs.map(log => ({
+                          ...log,
+                          round: log.round - maxRound,
+                      }));
+
+                      newChar.previousLifeLogs = combinedLogs;
                   }
               }
 
-              newChars[newChar.id] = newChar;
+              newChars[newId] = newChar;
               
-              newPositions[newChar.id] = {
+              newPositions[newId] = {
                   x: targetLoc ? targetLoc.coordinates.x : 0,
                   y: targetLoc ? targetLoc.coordinates.y : 0,
                   locationId: activeLocId
               };
-              
-              importedCount++;
           });
 
           let newOrder = prev.round.currentOrder;
@@ -473,58 +647,84 @@ export const useGamePersistence = (
               ...prev,
               characters: newChars,
               map: { ...prev.map, charPositions: newPositions },
-              round: { ...prev.round, currentOrder: newOrder }
+              round: { ...prev.round, currentOrder: newOrder },
+              cardPool: [...prev.cardPool, ...newPoolCards] 
           };
       });
       
       if (keepMemory) {
-          charsToImport.forEach(c => {
-              addLog(`系统: 角色 [${c.name}] 被神秘力量传送到了这个世界。`);
-          });
+          addLog(`系统: 已导入 ${charsToImport.length} 名角色及其完整前世记忆 (新身份ID及物品ID已生成)。`);
       } else {
-          addLog(`系统: 已导入 ${charsToImport.length} 名角色到当前地点。`);
+          addLog(`系统: 已导入 ${charsToImport.length} 名角色 (已重置为初始状态)。`);
       }
+      
+      persistState();
       
       setSaveLoadModal({ ...saveLoadModal, isOpen: false });
   };
 
-  const resetGame = () => {
-      forceClearReactionRequest(); // Clear blocked UI
+  const resetGame = async () => {
+      forceClearReactionRequest(); 
+      // Clear both storages to be safe
       localStorage.removeItem(AUTOSAVE_KEY);
+      await storage.removeItem(AUTOSAVE_KEY);
       
-      // Preserve current Theme Config
+      // Cleanup image storage cache and store
+      imageStorage.cleanup();
+      // Optionally clear image store (commented out to preserve images between hard resets if desired, but for full wipe should be cleared)
+      // await localforage.createInstance({ name: 'AetheriaEngine', storeName: 'image_blobs' }).clear(); 
+
       const currentThemeConfig = stateRef.current.appSettings.themeConfig;
-      
+      // Preserve Font Settings
+      const currentFontSize = stateRef.current.appSettings.storyLogFontSize;
+      const currentFontWeight = stateRef.current.appSettings.storyLogFontWeight;
+
       const freshState = createInitialGameState();
       
       const newState: GameState = {
           ...freshState,
           appSettings: {
               ...freshState.appSettings,
-              themeConfig: currentThemeConfig // Restore theme
+              themeConfig: currentThemeConfig,
+              storyLogFontSize: currentFontSize,
+              storyLogFontWeight: currentFontWeight
           },
           world: {
              ...freshState.world,
-             history: [{
-                 id: `log_reset_${Date.now()}`,
-                 round: 1, 
-                 turnIndex: 0, 
-                 content: "系统: 游戏已完全重置 (Factory Reset)。所有设定（包括 API Key）已恢复默认。", 
-                 timestamp: Date.now(), 
-                 type: 'system',
-                 snapshot: freshState.round
-             }]
+             history: [
+                 {
+                     id: `log_reset_${Date.now()}`,
+                     round: 1, 
+                     turnIndex: 0, 
+                     content: "系统: 游戏已完全重置 (Factory Reset)。所有设定（包括 API Key）已恢复默认。", 
+                     timestamp: Date.now(), 
+                     type: 'system',
+                     snapshot: freshState.round
+                 },
+                 {
+                     id: `log_init_done_${Date.now()}`,
+                     round: 1,
+                     turnIndex: 0,
+                     content: "系统: 初始化完成。",
+                     timestamp: Date.now() + 1,
+                     type: 'system',
+                     snapshot: freshState.round
+                 }
+             ]
           }
       };
 
       try {
-          localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(newState));
+          // Dehydrate fresh state (mostly empty but good practice)
+          // For AutoSave, we use dehydrateState (ID based)
+          const dehydrated = imageStorage.dehydrateState(newState);
+          await storage.setItem(AUTOSAVE_KEY, dehydrated);
       } catch (e) {
           console.error("Force autosave failed during reset:", e);
       }
 
       updateState(() => newState);
-      addLog("系统: 初始化完成。");
+      // addLog("系统: 初始化完成。"); // Removed to prevent state clobbering race condition
   };
 
   return {

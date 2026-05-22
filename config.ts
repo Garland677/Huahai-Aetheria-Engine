@@ -1,4 +1,3 @@
-
 import { Provider, AIConfig } from "./types";
 
 export const DEFAULT_API_CONFIG = {
@@ -7,7 +6,8 @@ export const DEFAULT_API_CONFIG = {
     [Provider.VOLCANO]: '',
     [Provider.OPENROUTER]: '',
     [Provider.OPENAI]: '',
-    [Provider.CLAUDE]: ''
+    [Provider.CLAUDE]: '',
+    [Provider.CUSTOM]: ''
 };
 
 export const DEFAULT_AI_CONFIG: AIConfig = {

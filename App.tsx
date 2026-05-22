@@ -13,6 +13,7 @@ import { Button } from './components/ui/Button';
 import { GameState } from './types';
 import { applyThemeToRoot } from './services/themeService';
 import { Window } from './components/ui/Window';
+import { Loader2 } from 'lucide-react';
 
 // Native Imports
 import { Capacitor } from '@capacitor/core';
@@ -38,26 +39,80 @@ export default function App() {
   const [confirmModal, setConfirmModal] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
   const [mobileView, setMobileView] = useState<'story' | 'map' | 'char'>('story');
 
-  // --- THEME APPLICATION EFFECT ---
+  // --- VISUAL VIEWPORT RESIZE EFFECT (Mobile Keyboard Fix) ---
+  useEffect(() => {
+    const setVh = () => {
+      if (window.visualViewport) {
+          document.documentElement.style.setProperty('--vh', `${window.visualViewport.height}px`);
+      } else {
+          document.documentElement.style.setProperty('--vh', `${window.innerHeight}px`);
+      }
+    };
+    
+    setVh();
+    
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', setVh);
+      window.visualViewport.addEventListener('scroll', setVh);
+      
+      // Secondary fallback: when the virtual keyboard changes size (e.g. switching to voice input),
+      // we ensure the currently focused input remains in view if the viewport shrink wasn't enough.
+      const ensureVisible = () => {
+          if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+              setTimeout(() => {
+                  document.activeElement?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }, 150);
+          }
+      };
+      window.visualViewport.addEventListener('resize', ensureVisible);
+      
+      return () => {
+        window.visualViewport?.removeEventListener('resize', setVh);
+        window.visualViewport?.removeEventListener('scroll', setVh);
+        window.visualViewport?.removeEventListener('resize', ensureVisible);
+      };
+    } else {
+      window.addEventListener('resize', setVh);
+      return () => window.removeEventListener('resize', setVh);
+    }
+  }, []);
+
+  // --- THEME & TYPOGRAPHY APPLICATION EFFECT ---
   // Apply theme whenever state.appSettings.themeConfig changes OR Light Mode Toggled
   useEffect(() => {
-      const config = game.state.appSettings.themeConfig;
-      if (config) {
-          applyThemeToRoot(config, game.state.appSettings.storyLogLightMode);
-          
-          // Native Status Bar Handling (Safe Guarded for Windows/Web Compatibility)
-          if (Capacitor.isNativePlatform()) {
-              try {
-                  const style = game.state.appSettings.storyLogLightMode ? Style.Light : Style.Dark;
-                  StatusBar.setStyle({ style }).catch(() => {
-                      // Silently fail if plugin not implemented/mocked
-                  });
-              } catch (e) {
-                  // Ignore errors on non-native platforms
+      // Only apply theme if loaded, to avoid flashing default colors if using dark mode
+      if (game.isStateLoaded) {
+          const config = game.state.appSettings.themeConfig;
+          if (config) {
+              applyThemeToRoot(config, game.state.appSettings.storyLogLightMode);
+              
+              // Native Status Bar Handling (Safe Guarded for Windows/Web Compatibility)
+              if (Capacitor.isNativePlatform()) {
+                  try {
+                      const style = game.state.appSettings.storyLogLightMode ? Style.Light : Style.Dark;
+                      StatusBar.setStyle({ style }).catch(() => {
+                          // Silently fail if plugin not implemented/mocked
+                      });
+                  } catch (e) {
+                      // Ignore errors on non-native platforms
+                  }
               }
           }
+          
+          // Apply Typography Settings
+          const root = document.documentElement;
+          const fontSize = game.state.appSettings.storyLogFontSize || 14;
+          const fontWeight = game.state.appSettings.storyLogFontWeight || 500;
+          root.style.setProperty('--story-font-size', `${fontSize}px`);
+          root.style.setProperty('--story-font-weight', String(fontWeight));
       }
-  }, [game.state.appSettings.themeConfig, game.state.appSettings.storyLogLightMode]);
+  }, [
+      game.state.appSettings.themeConfig, 
+      game.state.appSettings.storyLogLightMode, 
+      game.state.appSettings.storyLogFontSize,
+      game.state.appSettings.storyLogFontWeight,
+      game.isStateLoaded
+  ]);
 
   // Listen for RightPanel Toggle & Shop Open
   useEffect(() => {
@@ -83,8 +138,8 @@ export default function App() {
 
   const restartGame = () => {
       setConfirmModal({
-          title: "重置游戏 (Factory Reset)",
-          message: "警告：这将完全清空当前游戏的所有进度，删除自动存档，并恢复到【系统初始设置】。所有的自定义设置和 **API Key** 都将丢失。此操作不可撤销。",
+          title: "重置引擎",
+          message: "警告：这将完全清空当前存档的所有进度，删除自动存档，并恢复到系统初始设置，仅保留引擎主题配色与字体设置。此操作不可撤销。",
           onConfirm: () => {
               game.resetGame();
           }
@@ -120,17 +175,31 @@ export default function App() {
       }));
   };
 
+  // LOADING SCREEN (Prevents FOUT)
+  if (!game.isStateLoaded) {
+      return (
+          <div className="w-full h-screen flex flex-col items-center justify-center bg-app text-body transition-colors">
+              <Loader2 size={48} className="animate-spin text-primary mb-4"/>
+              <h2 className="text-xl font-bold tracking-widest uppercase text-highlight">花海引擎 AETHERIA</h2>
+              <p className="text-xs text-muted mt-2 font-mono">正在加载自动存档...</p>
+          </div>
+      );
+  }
+
   // Determine if swiping should be disabled (any modal/window open)
-  // OPTIMIZATION: Removed reactionRequest from disabled list to allow users to swipe back to respond
+  const isWindowsOpen = game.windows.length > 0;
   const isSwipeDisabled = 
-      game.windows.length > 0 || 
+      isWindowsOpen || 
       game.saveLoadModal.isOpen || 
       !!game.passwordChallenge || 
       !!confirmModal || 
       !!game.state.round.isWaitingForManualOrder;
 
   return (
-    <div className="w-full h-screen flex flex-col bg-app text-body relative font-sans select-none overflow-hidden transition-colors duration-500">
+    <div 
+        className="w-full flex flex-col bg-app text-body relative font-sans select-none overflow-hidden transition-colors duration-500"
+        style={{ height: 'var(--vh, 100vh)' }}
+    >
       
       {/* Confirmation Modal */}
       {confirmModal && (
@@ -213,6 +282,8 @@ export default function App() {
              addLog={game.addLog}
              onResetLocation={engine.resetLocation}
              onExploreLocation={engine.exploreLocation}
+             addDebugLog={game.addDebugLog}
+             onProcessMove={engine.processMove} // Pass processMove for manual story suggestions
           />
 
           {/* Center Panel (Story) */}
@@ -226,6 +297,7 @@ export default function App() {
                 onStopExecution={engine.stopExecution}
                 onUnveil={engine.performUnveil}
                 openWindow={game.openWindow}
+                onSkipPlayerTurn={() => engine.submitPlayerTurn(0)}
              />
              <PlayerControls 
                 state={game.state}
@@ -237,6 +309,7 @@ export default function App() {
                 selectedTargetId={engine.selectedTargetId}
                 setSelectedTargetId={engine.setSelectedTargetId}
                 submitPlayerTurn={engine.submitPlayerTurn}
+                performInstantAction={engine.performInstantAction}
                 isProcessingAI={engine.isProcessingAI}
                 pendingActions={engine.pendingActions}
                 setPendingActions={engine.setPendingActions}
@@ -251,6 +324,7 @@ export default function App() {
                 onRespondToReaction={game.respondToReactionRequest}
                 onAddLog={game.addLog}
                 addDebugLog={game.addDebugLog}
+                areWindowsOpen={isWindowsOpen} // New Prop for Auto Focus Logic
              />
           </div>
 

@@ -14,9 +14,9 @@ export const useGameHistory = (
     
     const isGlobalPhase = ['init', 'order', 'round_end'].includes(s.round.phase);
     
-    let locationId: string | undefined = undefined;
-    let presentCharIds: string[] | undefined = undefined;
-    let type: LogEntry['type'] = 'narrative';
+    let locationId: string | undefined = overrides?.locationId;
+    let presentCharIds: string[] | undefined = overrides?.presentCharIds;
+    let type: LogEntry['type'] = overrides?.type || 'narrative';
 
     if (text.startsWith('系统:') || text.startsWith('[系统]')) {
         type = 'system';
@@ -25,23 +25,32 @@ export const useGameHistory = (
     } else if (text.includes('使用了') || text.includes('花费') || text.includes('移动')) {
         type = 'action';
     }
+    
+    // Allow override type to persist if passed
+    if (overrides?.type) type = overrides.type;
 
-    if (!isGlobalPhase || type === 'action') {
+    if (locationId === undefined && (!isGlobalPhase || type === 'action')) {
         locationId = s.map.activeLocationId;
+    }
         
-        if (locationId) {
-            presentCharIds = Object.keys(s.characters).filter(id => {
-                const pos = s.map.charPositions[id];
-                return pos && pos.locationId === locationId;
-            });
-        }
+    if (locationId && presentCharIds === undefined) {
+        presentCharIds = Object.keys(s.characters).filter(id => {
+            const pos = s.map.charPositions[id];
+            return pos && pos.locationId === locationId;
+        });
     }
 
     // Capture precise round state for restoration
+    // We cast to any to allow injecting extra metadata like worldTime not strictly in RoundState type
     const snapshot: any = JSON.parse(JSON.stringify(s.round));
+    
+    // NEW: Inject World Time into snapshot for time delta calculations (Fix for {{LAST_PRESENT_TIME}})
+    if (s.world.attributes.worldTime) {
+        snapshot.worldTime = s.world.attributes.worldTime.value;
+    }
 
     const newEntry: LogEntry = {
-        id: `log_${Date.now()}_${Math.floor(Math.random()*1000)}`,
+        id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
         round: s.round.roundNumber,
         turnIndex: s.round.turnIndex,
         locationId,
@@ -253,9 +262,48 @@ export const useGameHistory = (
       // Safety check
       if (!targetLog) return;
 
-      // Slice history: Remove the target log and everything after it
-      // History will end at logIndex - 1
-      const newHistory = currentHistory.slice(0, logIndex);
+      // --- New Logic for Environment Character Backtracking ---
+      let cutIndex = logIndex;
+      let forcedActiveCharId = undefined;
+      let forcedPhase = undefined;
+
+      // Check if this is an Environment Character Log
+      const isEnvChar = targetLog.actingCharId && targetLog.actingCharId.startsWith('env_');
+      
+      if (isEnvChar) {
+          // Scan backwards to find associated system logs (Conflicts, Drives, Settlements, Start Marker)
+          // to include them in the removal.
+          for (let i = logIndex - 1; i >= 0; i--) {
+              const prevLog = currentHistory[i];
+              
+              // Stop if we change round/turn context
+              if (prevLog.round !== targetLog.round || prevLog.turnIndex !== targetLog.turnIndex) {
+                  break;
+              }
+
+              // Check for specific system log signatures
+              // 1. Env Start Marker
+              const isEnvStart = prevLog.content.includes("中人物的心理正在发生变化");
+              // 2. Consequential Logs (though usually appear AFTER, checking just in case of weird order)
+              const isConflict = prevLog.content.includes("新矛盾已产生");
+              const isDrive = prevLog.content.includes("新欲望已产生");
+              const isSettlement = prevLog.content.includes("轮次结算");
+
+              if (prevLog.type === 'system' && (isEnvStart || isConflict || isDrive || isSettlement)) {
+                  cutIndex = i; // Move cut point back
+              } else {
+                  // If we hit a non-system log or unrelated log (like another char's reaction), stop
+                  break; 
+              }
+          }
+
+          // Force state for re-execution
+          forcedActiveCharId = targetLog.actingCharId;
+          forcedPhase = 'char_acting';
+      }
+
+      // Slice history: Remove logs starting from cutIndex
+      const newHistory = currentHistory.slice(0, cutIndex);
       
       // Get base state from reconciliation (mostly for world/map context safety)
       const baseUpdates = reconcileStateFromHistory(newHistory);
@@ -269,24 +317,24 @@ export const useGameHistory = (
                                targetLog.content.includes("系统: 手动设定轮次顺序") ||
                                targetLog.content.includes("--- 第"); // Round start marker
 
-      let forcedPhase = isOrderOperation ? 'order' : 'char_acting';
+      let finalPhase = forcedPhase || (isOrderOperation ? 'order' : 'char_acting');
       // If phase is order, we haven't decided active char yet
-      let forcedActiveCharId = isOrderOperation ? undefined : restoredActiveCharId;
+      let finalActiveCharId = forcedActiveCharId || (isOrderOperation ? undefined : restoredActiveCharId);
 
       // CRITICAL FIX: If we are supposed to be acting, but don't have a valid Character ID 
       // (e.g. Environment character index drift, or order array mismatch),
       // we MUST fall back to 'turn_start' to let the engine resolve the next valid actor.
       // This prevents the game from getting stuck in 'char_acting' with no active character.
-      if (forcedPhase === 'char_acting' && !forcedActiveCharId) {
-          forcedPhase = 'turn_start';
+      if (finalPhase === 'char_acting' && !finalActiveCharId) {
+          finalPhase = 'turn_start';
       }
 
       const forcedRoundState: RoundState = {
           ...(baseUpdates.round || stateRef.current.round),
           roundNumber: targetLog.round,
           turnIndex: targetLog.turnIndex,
-          phase: forcedPhase as any, 
-          activeCharId: forcedActiveCharId,
+          phase: finalPhase as any, 
+          activeCharId: finalActiveCharId,
           isPaused: true, // Pause to let user review/click play
           lastErrorMessage: undefined,
           isWaitingForManualOrder: false
